@@ -6,6 +6,7 @@
 #include "common.h"
 #include "fg_select.h"
 #include "menu_buttons.h"
+#include "menu_pad.h"
 #include "xess_rules.h"
 #include <d3d12.h>
 #include <dxgi1_6.h>
@@ -49,7 +50,19 @@ const char* g_fontName = "ImGui default";
 char g_gpu[64];  // e.g. "RTX 4070": the adapter's name without the vendor prefix, for the counter
 UINT g_vendorId;  // adapter PCI vendor: 0x10DE NVIDIA, 0x1002 AMD, 0x8086 Intel
 float g_scale = 1;
-bool g_ready, g_open;
+bool g_ready;
+std::atomic<bool> g_open;  // read by the game's input hooks on their own threads
+// The controller: hooks publish each pad here; the present thread merges it once a frame (g_padView), times the combo and
+// feeds the menu. g_padUsed: the menu has had controller input since it opened (shows the hints); g_padOpened: the combo
+// opened it this frame; g_padBusy: last frame a list was open or a slider was being adjusted (B backs out instead of
+// closing); g_padRelease: the menu closed, release the controller keys next frame.
+pad::PadSlots g_pad;
+pad::PadView g_padView;
+bool g_padUsed, g_padOpened, g_padBusy, g_padRelease;
+static_assert(pad::kUp == XINPUT_GAMEPAD_DPAD_UP && pad::kDown == XINPUT_GAMEPAD_DPAD_DOWN && pad::kLeft == XINPUT_GAMEPAD_DPAD_LEFT &&
+              pad::kRight == XINPUT_GAMEPAD_DPAD_RIGHT && pad::kL3 == XINPUT_GAMEPAD_LEFT_THUMB && pad::kR3 == XINPUT_GAMEPAD_RIGHT_THUMB &&
+              pad::kA == XINPUT_GAMEPAD_A && pad::kB == XINPUT_GAMEPAD_B && pad::kStickDeadzone == XINPUT_GAMEPAD_LEFT_THUMB_DEADZONE,
+              "menu_pad.h's button bits match XInput's");
 LARGE_INTEGER g_freq, g_last;
 
 // settings ([overlay] in ffxv_dlss.ini; DLSS and FG ones live in their own sections)
@@ -163,10 +176,17 @@ HRESULT STDMETHODCALLTYPE hk_GetDeviceStateW(IDirectInputDevice8W* d, DWORD cb, 
 HRESULT STDMETHODCALLTYPE hk_GetDeviceStateA(IDirectInputDevice8W* d, DWORD cb, LPVOID p) { return getState(1, d, cb, p); }
 HRESULT STDMETHODCALLTYPE hk_GetDeviceDataW(IDirectInputDevice8W* d, DWORD cb, LPDIDEVICEOBJECTDATA o, LPDWORD n, DWORD f) { return getData(0, d, cb, o, n, f); }
 HRESULT STDMETHODCALLTYPE hk_GetDeviceDataA(IDirectInputDevice8W* d, DWORD cb, LPDIDEVICEOBJECTDATA o, LPDWORD n, DWORD f) { return getData(1, d, cb, o, n, f); }
+// The game's controller read: published for the menu without a lock (this is the game's input thread), then blanked
+// while the menu is open; while it is closed, a button held when the menu closed stays hidden until released.
 DWORD WINAPI hk_XInputGetState(DWORD i, XINPUT_STATE* s) {
     DWORD r = o_XInputGetState(i, s);
     g_xiTid = GetCurrentThreadId();
-    if (g_open && r == ERROR_SUCCESS && s) s->Gamepad = {};
+    if (s) {
+        const bool ok = r == ERROR_SUCCESS;
+        g_pad.record(i, ok, ok ? s->Gamepad.wButtons : 0, ok ? s->Gamepad.sThumbLX : 0, ok ? s->Gamepad.sThumbLY : 0, GetTickCount64());
+        if (ok && g_open) s->Gamepad = {};
+        else if (ok) s->Gamepad.wButtons = g_pad.hide(i, s->Gamepad.wButtons);
+    }
     return r;
 }
 
@@ -315,6 +335,7 @@ void applyStyle() {
     c[ImGuiCol_FrameBgHovered] = ImVec4(1, 1, 1, 0.10f);
     c[ImGuiCol_FrameBgActive] = ImVec4(1, 1, 1, 0.14f);
     c[ImGuiCol_CheckMark] = accentHi;
+    c[ImGuiCol_NavCursor] = accentHi;  // the controller's outline on the focused setting (FrameRounding, no animation)
     c[ImGuiCol_SliderGrab] = accent; c[ImGuiCol_SliderGrabActive] = accentHi;
     c[ImGuiCol_Button] = c[ImGuiCol_Header] = ImVec4(accent.x, accent.y, accent.z, 0.25f);  // Button: the combo arrow
     c[ImGuiCol_ButtonHovered] = c[ImGuiCol_HeaderHovered] = ImVec4(accent.x, accent.y, accent.z, 0.35f);
@@ -434,6 +455,7 @@ void drawMenu() {
     ImGui::SetNextWindowPos({ vp->Size.x * 0.5f, vp->Size.y * 0.5f }, ImGuiCond_Appearing, { 0.5f, 0.5f });
     ImGui::SetNextWindowSize({ 560 * g_scale, 0 }, ImGuiCond_Always);
     ImGui::Begin("Lumenveil", nullptr, ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoResize);
+    if (g_padOpened) { pad::focusFirst(); g_padOpened = false; }
     ImGui::PushTextWrapPos(0.0f);  // notes wrap at the window edge instead of being clipped
     const float labelW = 200 * g_scale;
     auto label = [&](const char* t) { ImGui::AlignTextToFramePadding(); ImGui::TextUnformatted(t); ImGui::SameLine(labelW); ImGui::SetNextItemWidth(-FLT_MIN); };
@@ -469,7 +491,9 @@ void drawMenu() {
         if (kUpscalers[want].tested) testedNote(kUpscalers[want].tested, kUpscalers[want].vendor);
         bool on = dlssEnabled();
         label("Enabled");
-        if (ImGui::Checkbox("##upscale", &on)) dlssToggle();
+        bool flip = ImGui::Checkbox("##upscale", &on);
+        flip |= pad::padTick(on);
+        if (flip) dlssToggle();
     }
 
     // Scaling mode = the game's RenderingResolutionRatio, read at launch (so a change applies after a restart)
@@ -536,7 +560,8 @@ void drawMenu() {
     }
     int sharp = di.sharpness;
     label("Sharpening");
-    if (ImGui::SliderInt("##sharp", &sharp, 0, 100, sharp ? "%d%%" : "Off")) { dlssSetSharpness(sharp); iniSet(L"dlss", L"sharpness", sharp); }
+    const bool sharpChanged = pad::padSlider("##sharp", sharp, 0, 100, 1, sharp ? "%d%%" : "Off");
+    if (sharpChanged) { dlssSetSharpness(sharp); iniSet(L"dlss", L"sharpness", sharp); }
 
     // ---- Frame Generation: its controls take the colour of the backend picked, the readouts that of the one running
     ImGui::SeparatorText("Frame Generation");
@@ -597,7 +622,9 @@ void drawMenu() {
         ImGui::BeginDisabled(!st.available && !fsrOffAtLaunch);
         bool on = fs.enable != 0;
         label("Enabled");
-        if (ImGui::Checkbox("##fg", &on)) { fs.enable = on; changed = true; }
+        bool fgFlip = ImGui::Checkbox("##fg", &on);
+        fgFlip |= pad::padTick(on);
+        if (fgFlip) { fs.enable = on; changed = true; }
         if (st.backend == 0) {  // DLSS-G modes: Dynamic (when supported), then 2x .. (max generated + 1)x; FSR and XeSS 2x
             const char* modes[7]; char modeNames[6][8]; int n = 0, cur = 0;
             if (st.dynamicSupported) modes[n++] = "Dynamic";
@@ -610,7 +637,7 @@ void drawMenu() {
             if (ImGui::Combo("##mode", &cur, modes, n)) { fs.frames = st.dynamicSupported ? cur : cur + 1; changed = true; }
             if (fs.frames == 0) {
                 label("Target fps");
-                changed |= ImGui::SliderInt("##target", &fs.target, 60, 480, "%d fps");
+                changed |= pad::padSlider("##target", fs.target, 60, 480, 5, "%d fps");
             }
         }
         if (st.generating && g_fpsRendered > 0)
@@ -651,7 +678,10 @@ void drawMenu() {
         int capMode = fs.limit < 0 ? 1 : fs.limit == 0 ? 0 : 2;
         label("Frame cap");
         if (ImGui::Combo("##capmode", &capMode, capModes, 3)) { fs.limit = capMode == 0 ? 0 : capMode == 1 ? -1 : std::max(st.autoCap, 60); changed = true; }
-        if (capMode == 2) { label("Cap"); changed |= ImGui::SliderInt("##limit", &fs.limit, 30, 480, "%d fps"); }
+        if (capMode == 2) {
+            label("Cap");
+            changed |= pad::padSlider("##limit", fs.limit, 30, 480, 5, "%d fps");
+        }
         else if (capMode == 1)
             ImGui::TextDisabled("Output capped at %d fps, just under the display's refresh, so %s stays engaged. "
                                 "Pair it with V-Sync on in the driver's control panel.", st.autoCap, syncName());
@@ -665,13 +695,18 @@ void drawMenu() {
 
     ImGui::SeparatorText("Overlay");
     label("FPS counter");
-    if (ImGui::Checkbox("##counter", &g_counter)) iniSet(L"overlay", L"enable", g_counter);
+    bool counterFlip = ImGui::Checkbox("##counter", &g_counter);
+    counterFlip |= pad::padTick(g_counter);
+    if (counterFlip) iniSet(L"overlay", L"enable", g_counter);
     static const char* corners[] = { "Top left", "Top right", "Bottom left", "Bottom right" };
     label("Position");
     if (ImGui::Combo("##corner", &g_corner, corners, 4)) iniSet(L"overlay", L"corner", g_corner);
 
     ImGui::Spacing();
-    ImGui::TextDisabled("Insert or Esc to close \xC2\xB7 changes apply and save immediately");
+    const bool popup = ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup);
+    g_padBusy = popup || ImGui::IsAnyItemActive();  // B backs out of the list or slider instead of closing the menu
+    if (g_padUsed) pad::drawHints(popup, g_padBusy, g_scale);  // in the footer line's own height: nothing moves
+    else ImGui::TextDisabled("Insert or Esc to close \xC2\xB7 changes apply and save immediately");
     ImGui::Spacing();
     ImGui::TextDisabled("Uses NVIDIA DLSS, NVIDIA Reflex and NVIDIA Streamline, AMD FSR and Intel XeSS. NVIDIA, DLSS and "
                         "Reflex are trademarks of NVIDIA Corporation, FSR of AMD and XeSS of Intel.");
@@ -753,13 +788,31 @@ void loadLogo() {
     logf("menu: logo %ux%u", w, h);
 }
 
+// Every way the menu closes (Insert, Esc, B, the stick combo): buttons held now stay hidden from the game until they are
+// released, so the press that closed the menu does not also reach the game.
+void closeMenu() {
+    g_pad.latchAll();
+    g_open = false;
+    g_padUsed = false;
+    g_padRelease = true;
+}
+
 void pollToggle() {
     static bool insDown, escDown;
+    static pad::ComboHold combo;
     const bool focused = GetForegroundWindow() == g_wnd;  // the keys are global; only react while the game is in front
     const bool ins = focused && (GetAsyncKeyState(VK_INSERT) & 0x8000) != 0, esc = focused && (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0;
-    if ((ins && !insDown) || (esc && !escDown && g_open)) {
-        g_open = !g_open;
-        if (g_open) g_mouse = { g_w * 0.5f, g_h * 0.5f };
+    const ULONGLONG tick = GetTickCount64();
+    g_padView = g_pad.merge(tick);
+    const bool stickCombo = combo.update(focused && g_padView.comboDown, tick);  // both sticks held in for half a second
+    const bool bClose = g_open && !g_padBusy && (g_padView.edges & pad::kB);
+    if ((ins && !insDown) || (esc && !escDown && g_open) || stickCombo || bClose) {
+        if (g_open) closeMenu();
+        else {
+            g_open = true;
+            g_mouse = { g_w * 0.5f, g_h * 0.5f };
+            if (stickCombo) g_padUsed = g_padOpened = true;
+        }
         std::lock_guard<std::mutex> lk(g_inMx);
         g_dx = g_dy = g_wheel = 0; g_btns = {};
         g_inStats = {}; g_inStatsTick = GetTickCount64();
@@ -843,7 +896,7 @@ bool menuInit(ID3D12Device* dev, ID3D12CommandQueue* queue, HWND wnd, UINT heigh
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
     io.IniFilename = nullptr;  // nothing written next to the game
-    io.ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;
+    io.ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange | ImGuiConfigFlags_NavEnableGamepad;
     loadFonts();
     applyStyle();
     ImGui_ImplDX12_InitInfo ii;
@@ -901,6 +954,14 @@ bool compose(IDXGISwapChain3* sc, UINT index, bool layer) {
     io.DisplaySize = { float(g_w), float(g_h) };
     io.MouseDrawCursor = g_open;
     feedMouse(io);
+    if (g_open) {
+        if (g_padView.connected) io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
+        else io.BackendFlags &= ~ImGuiBackendFlags_HasGamepad;
+        pad::feedPad(io, g_padView, g_padBusy);
+        if (g_padView.edges || g_padView.comboDown || pad::stickPast(g_padView.lx, 1) || pad::stickPast(g_padView.lx, -1) ||
+            pad::stickPast(g_padView.ly, 1) || pad::stickPast(g_padView.ly, -1))
+            g_padUsed = true;
+    } else if (g_padRelease) { pad::releasePad(io); g_padRelease = false; }
     ImGui_ImplDX12_NewFrame();
     ImGui::NewFrame();
     if (g_counter) drawCounter();
@@ -966,7 +1027,9 @@ void menuFrame(IDXGISwapChain3* sc, UINT index) {
     // While FSR generates frames the UI goes to it as a layer, drawn over real and generated frames instead of being
     // interpolated with the scene.
     const bool layer = g_layer && g_psoLayer && p12FsrGenerating();
-    const bool drew = (g_counter || g_open) && compose(sc, index, layer);
+    // g_padRelease: one ImGui frame after every close even with the counter off, so the menu window misses a frame and
+    // reopens on its first setting, and the controller keys are released
+    const bool drew = (g_counter || g_open || g_padRelease) && compose(sc, index, layer);
     if (drew && layer) { fsrFgUi(g_layer); g_layered = true; }
     else if (g_layered) { fsrFgUi(nullptr); g_layered = false; }
 }

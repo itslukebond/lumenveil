@@ -163,6 +163,9 @@ the release) goes through it step by step, and shows how to install by hand if a
 Press **Insert** at any time in game to open or close the mod's menu. Changes apply straight away unless the menu says
 otherwise, and they're saved to `ffxv_dlss.ini` next to the game.
 
+With a controller, hold both sticks in (L3 and R3) for half a second to open or close the menu. Use the D-pad or left
+stick to move, A to change a setting and B to close a list or the menu. On a Steam Deck this works without a keyboard.
+
 <p align="center">
   <img src="docs/images/menu.png" alt="The mod's menu in game: DLSS at Performance, DLSS Frame Generation at 2x, Reflex on" width="420">
 </p>
