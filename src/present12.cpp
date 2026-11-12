@@ -412,6 +412,7 @@ unsigned fgAfterPresent() {
     }
     g_d3d12Queue->Signal(g_fence, g_inputsFree = ++g_fenceVal);
     if (++g_rendered == 500) {
+        dlssgVersion();  // logs the frame generation file and its folder once it has loaded, menu open or not
         // Reflex sleeps here, on the present thread: only right if the game also polls input on it
         DWORD di, xi; unsigned polls; inputThreads(&di, &xi, &polls);
         const double n = g_rendered;
