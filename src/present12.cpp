@@ -13,6 +13,7 @@
 #include <d3d11_4.h>
 #include <d3d12.h>
 #include <dxgi1_6.h>
+#include <psapi.h>
 #include <MinHook.h>
 #include <algorithm>
 #include <cmath>
@@ -629,21 +630,38 @@ FgStatus fgStatus() {
     if (proxyFg()) { s.dynamicSupported = false; s.maxGenerated = 1; }  // FSR and XeSS generate one frame per rendered one
     return s;
 }
-// NVIDIA's runtime loads nvngx_dlssg.dll when frame generation first starts. Its version is read once the file is in the
-// process, so the menu names the file that runs, including one put in by update.
-const char* dlssgVersion() {
-    static char v[24];
-    if (*v) return v;
-    HMODULE m = GetModuleHandleW(L"nvngx_dlssg.dll");
-    wchar_t fn[MAX_PATH];
-    if (!m || !GetModuleFileNameW(m, fn, MAX_PATH)) return v;
+// NVIDIA's runtime loads nvngx_dlssg.dll when frame generation first starts. Each copy in the process is logged once with
+// its folder. A copy from outside the game folder is the driver's own, which the runtime loads only when it found none of
+// ours: the menu then names that one, so it always shows the file that runs.
+static void fileVersion(const wchar_t* fn, char* out, size_t len) {
     DWORD h = 0, sz = GetFileVersionInfoSizeW(fn, &h);
     std::vector<BYTE> b(sz ? sz : 1); VS_FIXEDFILEINFO* fi = nullptr; UINT fl = 0;
-    if (sz && GetFileVersionInfoW(fn, 0, sz, b.data()) && VerQueryValueW(b.data(), L"\\", (void**)&fi, &fl) && fi) {
-        snprintf(v, sizeof v, "%u.%u.%u.%u", HIWORD(fi->dwFileVersionMS), LOWORD(fi->dwFileVersionMS), HIWORD(fi->dwFileVersionLS),
+    if (sz && GetFileVersionInfoW(fn, 0, sz, b.data()) && VerQueryValueW(b.data(), L"\\", (void**)&fi, &fl) && fi)
+        snprintf(out, len, "%u.%u.%u.%u", HIWORD(fi->dwFileVersionMS), LOWORD(fi->dwFileVersionMS), HIWORD(fi->dwFileVersionLS),
                  LOWORD(fi->dwFileVersionLS));
-        logf("fg: %S v%s", fn, v);
+}
+const char* dlssgVersion() {
+    static char v[48];
+    if (*v || !GetModuleHandleW(L"nvngx_dlssg.dll")) return v;
+    HMODULE mods[1024]; DWORD need = 0;
+    if (!EnumProcessModules(GetCurrentProcess(), mods, sizeof mods, &need)) return v;
+    const std::wstring game = path(L"");
+    char ours[24] = "", driver[24] = "";
+    const DWORD n = std::min<DWORD>(need / sizeof(HMODULE), _countof(mods));
+    for (DWORD i = 0; i < n; ++i) {
+        wchar_t fn[MAX_PATH];
+        if (!GetModuleFileNameW(mods[i], fn, MAX_PATH)) continue;
+        const wchar_t* base = fn;
+        for (const wchar_t* c = fn; *c; ++c) if (*c == L'\\' || *c == L'/') base = c + 1;  // the runtime may use either
+        if (_wcsicmp(base, L"nvngx_dlssg.dll")) continue;
+        char ver[24] = "?";
+        fileVersion(fn, ver, sizeof ver);
+        const bool inGame = _wcsnicmp(fn, game.c_str(), game.size()) == 0;
+        logf("fg: nvngx_dlssg.dll loaded from %S v%s%s", fn, ver, inGame ? "" : " (the driver's copy, not the game folder's)");
+        strcpy_s(inGame ? ours : driver, sizeof ours, ver);
     }
+    if (*driver) snprintf(v, sizeof v, "%s (driver's copy)", driver);
+    else snprintf(v, sizeof v, "%s", ours);
     return v;
 }
 void fgApply(const FgSettings& s) {

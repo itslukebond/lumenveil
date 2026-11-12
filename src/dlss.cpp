@@ -202,10 +202,13 @@ bool initNgx() {
     static std::wstring modDir = path(L"ffxv_dlss");
     // not shipped with the mod: the user copies NVIDIA's DLL in (see the menu)
     if (GetFileAttributesW((modDir + L"\\nvngx_dlss.dll").c_str()) == INVALID_FILE_ATTRIBUTES) { logf("dlss: %S\\nvngx_dlss.dll missing", modDir.c_str()); return false; }
-    const wchar_t* paths[] = { modDir.c_str() };
+    // Frame generation's nvngx_dlssg.dll lives with Streamline's files. NVIDIA's runtime picks feature files from the
+    // folders given here, and without that folder it loads the older copy that comes with the driver.
+    static std::wstring slDir = modDir + L"\\streamline";
+    const wchar_t* paths[] = { slDir.c_str(), modDir.c_str() };
     NVSDK_NGX_FeatureCommonInfo fi = {};
     fi.PathListInfo.Path = paths;
-    fi.PathListInfo.Length = 1;
+    fi.PathListInfo.Length = _countof(paths);
     fi.LoggingInfo.LoggingCallback = ngxLog;
     fi.LoggingInfo.MinimumLoggingLevel = NVSDK_NGX_LOGGING_LEVEL_VERBOSE;
     // FFXV's own NGX app id (0xB9DFA64) maps every DLSS feature in this process to the 2018 DLSS 1

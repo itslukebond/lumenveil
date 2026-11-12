@@ -211,6 +211,9 @@ also remove `WINEDLLOVERRIDES="dxgi=n,b"` from the game's Launch Options.
   cards and with AMD's FSR 4. AMD's newest FSR on Radeon RX 9000 is untested too, and its frame generation may look
   wrong there. If it does, turn FSR frame generation off in the menu and keep FSR upscaling.
 - **Intel XeSS.** Tested on an NVIDIA GeForce RTX 5090 only. Untested on Intel Arc.
+- **RivaTuner Statistics Server (RTSS).** Its hooks can stop the mod's frame generation from starting, and then Insert
+  does nothing. In RTSS, add a profile for `ffxv_s.exe` and turn off its hooks there (`EnableHooking=0` under
+  `[Hooking]` in that profile's file).
 
 ---
 
