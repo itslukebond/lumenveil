@@ -8,6 +8,7 @@
 #include "menu_buttons.h"
 #include "menu_pad.h"
 #include "xess_rules.h"
+#include "antilag_rules.h"
 #include <d3d12.h>
 #include <dxgi1_6.h>
 #include <d3dcompiler.h>
@@ -659,15 +660,47 @@ void drawMenu() {
             label("Low latency");
             if (ImGui::Combo("##xell", &xell, xellModes, 2) && xell != (fs.reflex > 0 ? 1 : 0)) { fs.reflex = xell; changed = true; }
             ImGui::TextDisabled("XeSS frame generation needs Xe Low Latency, so it stays on while frame generation is enabled.");
-        } else if (st.backend == 1 || di.active == 1) {  // the presenter paces frames itself whenever FSR or XeSS is in use
+        } else if ((st.backend == 1 || di.active == 1) && !al2MenuShown(st.antilag, st.backend)) {  // the presenter paces frames itself whenever FSR or XeSS is in use
             ImGui::SeparatorText("Latency");
             ImGui::TextDisabled("The game waits for the GPU each frame instead of queueing frames ahead (FSR has no Reflex).");
-        } else if (di.active == 2) {
+        } else if (di.active == 2 && !al2MenuShown(st.antilag, st.backend)) {
             ImGui::SeparatorText("Latency");
             ImGui::TextDisabled("The game waits for the GPU each frame instead of queueing frames ahead.");
         }
     }
     ImGui::EndDisabled();
+    if (al2MenuShown(st.antilag, st.backend)) {  // AMD Radeon Anti-Lag 2: outside the block above, so it works without FG
+        AccentScope accent(kAmd);
+        ImGui::SeparatorText("AMD Radeon Anti-Lag 2");
+        const bool ready = st.antilag == kAl2Ready;
+        ImGui::BeginDisabled(!ready);
+        static const char* al2Modes[] = { "Off", "On" };
+        int al2 = ready && fs.antilag ? 1 : 0;  // Off while unavailable; the stored setting is kept
+        label("Low latency");
+        if (ImGui::Combo("##antilag", &al2, al2Modes, 2) && ready && al2 != (fs.antilag ? 1 : 0)) { fs.antilag = al2; changed = true; }
+        ImGui::EndDisabled();
+        // the presenter paces frames itself whenever FSR or XeSS is in use; then Anti-Lag 2 comes on top of that
+        const bool paces = st.backend == 1 || di.active == 1 || di.active == 2;
+        static const char* const kNoDriver = "Not available: Anti-Lag 2 needs an AMD Radeon RX 5000 series card or newer and "
+                                             "AMD Software: Adrenalin Edition 24.7.1 or newer.";
+        static const char* const kLinux = "Not available on Linux: Anti-Lag 2 needs AMD's Windows driver.";
+        static const char* const kOff = "Off: the game waits for the GPU each frame instead of queueing frames ahead.";
+        static const char* const kOffNative = "Off: frames can queue ahead of the GPU, as without the mod.";
+        static const char* const kOn = "On: AMD's driver also holds back the game's next frame until just before the GPU needs it, for lower input lag.";
+        static const char* const kOnNative = "On: AMD's driver holds back the game's next frame until just before the GPU needs it, for lower input lag.";
+        // the note keeps the height of the longest one, so the menu does not change size between states
+        const float wrapW = ImGui::GetContentRegionAvail().x, gap = ImGui::GetStyle().ItemSpacing.y;
+        float slotH = 0;
+        for (const char* s : { kNoDriver, kLinux, kOff, kOffNative, kOn, kOnNative })
+            slotH = std::max(slotH, ImGui::CalcTextSize(s, nullptr, false, wrapW).y);
+        const float y0 = ImGui::GetCursorPosY();
+        if (st.antilag == kAl2Wine) ImGui::TextDisabled("%s", kLinux);
+        else if (!ready) ImGui::TextColored(kAmber, "%s", kNoDriver);
+        else if (al2) ImGui::TextDisabled("%s", paces ? kOn : kOnNative);
+        else ImGui::TextDisabled("%s", paces ? kOff : kOffNative);
+        if (ImGui::GetCursorPosY() < y0 + slotH + gap) { ImGui::SetCursorPosY(y0 + slotH); ImGui::Dummy(ImVec2(0, 0)); }
+        testedNote("Untested on Radeon cards so far. If the game stutters or crashes with it on, turn it off and send ffxv_dlss.log.", kAmd);
+    }
     {
         AccentScope accent(kNeutral);  // the mod's own frame cap, whichever backend runs
         // it applies through Reflex when Streamline runs, else through the presenter's own pacing (FSR or XeSS), so it
@@ -690,7 +723,7 @@ void drawMenu() {
     if (changed) {
         fgApply(fs);
         iniSet(L"fg", L"enable", fs.enable); iniSet(L"fg", L"frames", fs.frames); iniSet(L"fg", L"target", fs.target); iniSet(L"fg", L"limit", fs.limit);
-        iniSet(L"fg", L"reflex", fs.reflex);
+        iniSet(L"fg", L"reflex", fs.reflex); iniSet(L"fg", L"antilag", fs.antilag);
     }
 
     ImGui::SeparatorText("Overlay");

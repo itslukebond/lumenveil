@@ -99,7 +99,7 @@ and the game is back to how it shipped.
 | --- | --- |
 | **Three upscalers** | NVIDIA DLSS, AMD FSR or Intel XeSS in place of the game's TAA, at any resolution, not just 4K. Auto picks one for your card (DLSS on NVIDIA, XeSS on Intel, FSR on the rest), or choose it yourself. |
 | **NVIDIA DLSS** | DLAA, Quality, Balanced, Performance and Ultra Performance. Pick the DLSS model too: K, M, L, J, or the older E and F. DLSS Frame Generation at 2x on RTX 40 cards. RTX 50 cards also get multi frame generation, up to 6x with a current DLSS file, and NVIDIA's Dynamic mode that aims for a target fps. Reflex On, or On + Boost. |
-| **AMD FSR** | FSR upscaling and 2x frame generation, for cards that can't run DLSS. It also brings frame generation to RTX 20 and 30 cards, which don't get DLSS Frame Generation. AMD's files pick the newest FSR your card supports. |
+| **AMD FSR** | FSR upscaling and 2x frame generation, for cards that can't run DLSS. It also brings frame generation to RTX 20 and 30 cards, which don't get DLSS Frame Generation. AMD's files pick the newest FSR your card supports. On a Radeon, AMD's Anti-Lag 2 for lower input lag. |
 | **Intel XeSS** | XeSS Super Resolution, and 2x XeSS frame generation with Intel's Xe Low Latency. Runs on Intel Arc and on other DirectX 12 cards with Shader Model 6.4. |
 | **Sharper HUD and text at 4K** | The game draws its HUD text from 1080p sized letters and stretches them. The mod rebuilds the letters at twice the resolution from a matching font (TeX Gyre Adventor), each one in its original place. HUD shapes, the minimap and the title screen get a cleaner upscale too. |
 | **In-game menu** | Press **Insert** for every setting, with an fps counter that counts generated frames properly. |
@@ -119,6 +119,8 @@ and the game is back to how it shipped.
 - For AMD FSR, any DirectX 12 card AMD's files support. I've only tested FSR on my RTX 5090 (see Known issues).
 - For Intel XeSS, a DirectX 12 card with Shader Model 6.4 (Intel Arc, or a recent NVIDIA or AMD card). I've only tested
   XeSS on my RTX 5090 (see Known issues).
+- For AMD Radeon Anti-Lag 2, Windows with a Radeon RX 5000 series card or newer and AMD Software: Adrenalin Edition
+  24.7.1 or newer. Off by default.
 
 ---
 
@@ -178,7 +180,7 @@ stick to move, A to change a setting and B to close a list or the menu. On a Ste
 | **Sharpening** | Optional extra sharpening after upscaling, from Off to 100%. |
 | **Frame generation backend** | Auto, NVIDIA DLSS Frame Generation, AMD FSR Frame Generation or Intel XeSS Frame Generation. Auto uses DLSS Frame Generation on an NVIDIA card with NVIDIA's files, XeSS Frame Generation on an Intel card with Intel's files, otherwise FSR. A change applies after a restart. |
 | **Frame Generation** | Off, a fixed 2x or higher, or Dynamic with a target fps. The menu lists what your card and DLSS file can do: 2x on RTX 40 cards, up to 6x on RTX 50. FSR and XeSS generate 2x. After the first save loads, frame generation waits about 20 seconds before it starts. |
-| **Reflex** | Off, On, or On + Boost, with DLSS Frame Generation. Frame Generation keeps Reflex on. With XeSS Frame Generation this section is Intel's Xe Low Latency instead, which stays on while frame generation is enabled. |
+| **Reflex** | Off, On, or On + Boost, with DLSS Frame Generation. Frame Generation keeps Reflex on. With XeSS Frame Generation this section is Intel's Xe Low Latency instead, which stays on while frame generation is enabled. On an AMD Radeon card with FSR, it is AMD Radeon Anti-Lag 2 instead, Off or On, off by default. |
 | **Frame cap** | Off, Auto or Custom. Auto caps just under your display's refresh rate, so G-Sync, FreeSync or Adaptive Sync stays engaged. Pair it with V-Sync on in your driver's control panel. |
 | **FPS counter** | Show or hide the counter and pick its corner. It shows the fps you see and the base fps the game renders. |
 
@@ -214,6 +216,8 @@ also remove `WINEDLLOVERRIDES="dxgi=n,b"` from the game's Launch Options.
   cards and with AMD's FSR 4. AMD's newest FSR on Radeon RX 9000 is untested too, and its frame generation may look
   wrong there. If it does, turn FSR frame generation off in the menu and keep FSR upscaling.
 - **Intel XeSS.** Tested on an NVIDIA GeForce RTX 5090 only. Untested on Intel Arc.
+- **AMD Radeon Anti-Lag 2.** Untested on Radeon cards so far, and Windows only. If you try it, please report how it
+  went, with ffxv_dlss.log.
 - **RivaTuner Statistics Server (RTSS).** Its hooks can stop the mod's frame generation from starting, and then Insert
   does nothing. In RTSS, add a profile for `ffxv_s.exe` and turn off its hooks there (`EnableHooking=0` under
   `[Hooking]` in that profile's file).

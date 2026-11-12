@@ -134,11 +134,13 @@ bool xessFgFrame(bool on, const FgFrame* f, ID3D12Resource* depth, ID3D12Resourc
 // present12.cpp: frame generation settings, for the menu
 // frames: 0 = dynamic MFG, 1..5 generated per rendered; limit: Reflex fps cap, 0 off, -1 auto (under refresh, for
 // G-Sync); reflex: 0 off, 1 on, 2 on + boost
-struct FgSettings { int enable, frames, target, limit, reflex; };
+// antilag: [fg] antilag, AMD Radeon Anti-Lag 2 switched on (0 by default)
+struct FgSettings { int enable, frames, target, limit, reflex, antilag; };
 // autoCap: the frame cap that limit = -1 ("Auto") uses, just under the display refresh so G-Sync/VRR stays engaged
 // backend: the one frame generation backend chosen at launch by [fg] backend (fg_select.h): -1 none, 0 DLSS-G
 // (Streamline), 1 FSR, 2 XeSS; formatRefused: XeSS-FG was chosen but the game's back buffer is 16-bit float (scRGB)
-struct FgStatus { bool available, generating, dynamicSupported; unsigned maxGenerated; int autoCap; int backend; bool formatRefused; };
+// antilag: AMD Radeon Anti-Lag 2's Al2State (antilag_rules.h); antilagOn: it ran on the last frame
+struct FgStatus { bool available, generating, dynamicSupported; unsigned maxGenerated; int autoCap; int backend; bool formatRefused; int antilag; bool antilagOn; };
 FgSettings fgSettings();
 void fgApply(const FgSettings& s);
 FgStatus fgStatus();

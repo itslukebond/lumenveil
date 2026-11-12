@@ -10,6 +10,7 @@
 #include "fg_gate.h"
 #include "fg_select.h"
 #include "xess_rules.h"
+#include "antilag_rules.h"
 #include <d3d11_4.h>
 #include <d3d12.h>
 #include <dxgi1_6.h>
@@ -22,6 +23,10 @@
 #include <sl_reflex.h>
 #include <sl_pcl.h>
 #include <sl_matrix_helpers.h>
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wmicrosoft-cast"  // AMD's header, kept unmodified, casts GetProcAddress's result
+#include <ffx_antilag2_dx12.h>  // AMD Radeon Anti-Lag 2 (MIT header, third_party/amd-antilag2); AMD's driver does the work
+#pragma clang diagnostic pop
 
 ID3D12Device* g_d3d12;
 ID3D12CommandQueue* g_d3d12Queue;
@@ -73,6 +78,17 @@ PFN_CreateSCHwnd g_create;          // same window (XeSS-FG once the game's form
 int g_colorSpace = -1;              // the colour space the game last set, for a swapchain made later
 unsigned g_xeId;                    // XeSS-FG / XeLL frame id: XeLL's frame, the tags and the Present of one rendered frame
 UINT g_vendor;                      // adapter PCI vendor: 0x10DE NVIDIA, 0x1002 AMD, 0x8086 Intel
+// AMD Radeon Anti-Lag 2 on our D3D12 device. Static storage: FSR's presenter thread holds the context's address.
+AMD::AntiLag2DX12::Context g_al2;
+Al2State g_al2State;                // what p12Init found (antilag_rules.h); kAl2NotStarted until then and after fail()
+bool g_al2Logged;                   // the first failing Update has been logged
+const void* g_al2DataSc;            // the swap chain FSR reads the context from, and the state it was last given
+bool g_al2DataOn;
+// How FSR's frame generation swap chain (FidelityFX 2.4.0) reads Anti-Lag 2: this private data on the swap chain, so it
+// marks each frame it presents as generated or real.
+const GUID kFfxAntiLag2Data = {0x5083ae5b, 0x8070, 0x4fca, {0x8e, 0xe5, 0x35, 0x82, 0xdd, 0x36, 0x7d, 0x13}};
+struct Al2FsrData { AMD::AntiLag2DX12::Context* context; bool enabled; };
+static_assert(sizeof(Al2FsrData) == 16, "FSR reads exactly this layout");
 // A vendor's frame generation swapchain replaces ours (FSR or XeSS): no Streamline, the presenter paces frames itself.
 bool proxyFg() { return g_fsrFg || g_xessSc; }
 
@@ -464,6 +480,9 @@ HRESULT fitSwapchain(UINT w, UINT h, DXGI_FORMAT format) {
     release(g_sc);
     if (g_xessSc) { xessFgDestroy(); g_simOpen = false; g_xessGen = false; }  // after our last reference to Intel's swapchain, as in fail()
     g_xessSc = false;
+    // AMD Radeon Anti-Lag 2 never runs alongside XeLL: off before Intel's swapchain starts it (the setting is kept, and a
+    // plain swapchain later turns it back on in p12Present)
+    if (want && g_al2.m_enabled) { AMD::AntiLag2DX12::Update(&g_al2, false, 0); logf("antilag: off (Intel's frame generation)"); }
     IDXGISwapChain1* sc1 = nullptr;
     if (want && !(sc1 = xessFgSwapchain(g_factory, g_d3d12, g_d3d12Queue, g_wnd, &sd, reflexEffective()))) {
         logf("fg: XeSS swapchain failed, frame generation off");
@@ -545,6 +564,8 @@ void fail(const char* what, HRESULT hr) {
     if (g_xessSc && g_fence && g_idleEvent) waitIdle();  // XeSS's tag lists may still use its swapchain's resources
     release(g_sc);
     xessFgDestroy();  // after our last reference to Intel's swapchain (it refuses otherwise), before the queue it uses
+    // Anti-Lag 2 after FSR's presenter thread has stopped (fsrFgDestroy) and before the device; a no-op if never started
+    AMD::AntiLag2DX12::DeInitialize(&g_al2); g_al2State = kAl2NotStarted; g_al2DataSc = nullptr; g_al2DataOn = false;
     release(g_cl[0]); release(g_cl[1]); release(g_cl[2]); release(g_alloc);
     release(g_fence11); release(g_fence); release(g_up11); release(g_up); release(g_ctx11); release(g_dev11);
     release(g_d3d12Queue); release(g_d3d12); release(g_factory);
@@ -628,6 +649,7 @@ FgStatus fgStatus() {
     s.available = g_fg || proxyFg(); s.generating = proxyFg() ? g_fsrGen || g_xessGen : g_fgOn; s.autoCap = g_autoCap;
     s.backend = g_xessSc ? 2 : g_fsrFg ? 1 : g_fg ? 0 : -1;
     s.formatRefused = g_xessRefused;
+    s.antilag = g_al2State; s.antilagOn = g_al2.m_enabled;
     if (proxyFg()) { s.dynamicSupported = false; s.maxGenerated = 1; }  // FSR and XeSS generate one frame per rendered one
     return s;
 }
@@ -694,7 +716,7 @@ HWND p12Init(IUnknown* dev, IDXGIFactory2* f, PFN_CreateSCHwnd create, HWND wnd,
     DXGI_ADAPTER_DESC adesc;
     if (SUCCEEDED(ad->GetDesc(&adesc))) g_vendor = adesc.VendorId;
     g_wine = GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "wine_get_version") != nullptr;
-    g_set = { ini(L"fg", L"enable", 1), ini(L"fg", L"frames", 0), ini(L"fg", L"target", 240), ini(L"fg", L"limit", -1), ini(L"fg", L"reflex", 1) };
+    g_set = { ini(L"fg", L"enable", 1), ini(L"fg", L"frames", 0), ini(L"fg", L"target", 240), ini(L"fg", L"limit", -1), ini(L"fg", L"reflex", 1), ini(L"fg", L"antilag", 0) };
     // Frame generation backend, one per session (it decides which swapchain we create): [fg] backend through fgPickBackend
     // (fg_select.h). Exactly one of g_fg, g_fsrFg and g_xessFg is set here, or none.
     const int setting = ini(L"fg", L"backend", -1);
@@ -772,6 +794,17 @@ HWND p12Init(IUnknown* dev, IDXGIFactory2* f, PFN_CreateSCHwnd create, HWND wnd,
     if (SUCCEEDED(hr)) { hr = sc1->QueryInterface(IID_PPV_ARGS(&g_sc)); sc1->Release(); }
     if (FAILED(hr)) { g_xessSc = false; fail("D3D12 swapchain", hr); return nullptr; }
     if (!createTargets()) { fail("shared targets", E_FAIL); return nullptr; }
+    // AMD Radeon Anti-Lag 2: asked whatever the setting, so the menu knows whether it is available. AMD's driver loads its
+    // D3D12 extension with the device; under Wine there is none.
+    const HRESULT al2Hr = g_vendor == 0x1002 && !g_wine ? AMD::AntiLag2DX12::Initialize(&g_al2, g_d3d12) : S_OK;
+    g_al2State = al2Classify(g_vendor, g_wine, al2Hr);
+    switch (g_al2State) {
+    case kAl2NotAmd: logf("antilag: not an AMD card"); break;
+    case kAl2Wine: logf("antilag: not started under Wine/Proton (needs AMD's Windows driver)"); break;
+    case kAl2NoDriver: logf("antilag: AMD's D3D12 driver extension is not loaded (amdxc64.dll), unavailable"); break;
+    case kAl2Refused: logf("antilag: AMD's driver refused Anti-Lag 2 (%08x): needs RX 5000 or newer and Adrenalin 24.7.1 or newer", al2Hr); break;
+    default: logf("antilag: available, setting %s", g_set.antilag ? "on" : "off"); break;
+    }
 
     g_wnd = wnd;  // before setReflex: the auto cap is the refresh rate of this window's monitor
     if (!g_fg) g_autoCap = autoCap();  // fsrPace's auto cap; the Streamline path sets it with Reflex
@@ -834,8 +867,17 @@ HRESULT p12Present(UINT si, UINT flags) {
     if (g_fsrFg) { fgBeforePresent(); g_tUs[2] += lapUs(t); }
     menuFrame(g_sc, bb);  // counter + Insert menu, drawn over the copied frame
     g_tUs[1] += lapUs(t);
+    // AMD Radeon Anti-Lag 2, decided after the menu so a change applies this frame. FSR's presenter thread reads it from
+    // the swap chain's private data, set only when it changes so that thread reads settled data.
+    const bool al2 = al2Run(g_al2State, g_set.antilag, g_fg, g_xessSc);
+    if (g_fsrFg && (g_sc != g_al2DataSc || al2 != g_al2DataOn)) {
+        const Al2FsrData data = { &g_al2, al2 };
+        g_sc->SetPrivateData(kFfxAntiLag2Data, sizeof data, &data);
+        g_al2DataSc = g_sc; g_al2DataOn = al2;
+    }
     if (g_fg || g_xessSc) fgBeforePresent();  // XeSS: its markers and present id right before Present
     g_tUs[2] += lapUs(t);
+    if (g_fsrFg && al2) AMD::AntiLag2DX12::MarkEndOfFrameRendering(&g_al2);  // before FSR generates from this frame
     HRESULT hr = g_sc->Present(si, si == 0 && g_tearing ? flags | DXGI_PRESENT_ALLOW_TEARING : flags);  // blocks once 3 frames are queued, like D3D11's default latency
     g_tUs[3] += lapUs(t);
     menuCount(g_fg ? fgAfterPresent() : g_xessSc ? xessFgAfterPresent(g_xeId++) : g_fsrGen ? 2 : 1);
@@ -843,6 +885,12 @@ HRESULT p12Present(UINT si, UINT flags) {
     if (++presents % 240 == 0) refreshEncoding();  // NVAPI HDR can change after our swapchain exists
     const int up = g_fg ? -1 : dlssInfo().active;
     if (proxyFg() || up == 1 || up == 2) fsrPace();  // FSR or XeSS in use and no Reflex (FG may be off at launch)
+    if (al2 || g_al2.m_enabled) {  // AMD's driver holds the game's next frame here; off: one call turns it off, then none
+        const bool was = g_al2.m_enabled;
+        const HRESULT r = AMD::AntiLag2DX12::Update(&g_al2, al2, 0);  // 0: no cap of AMD's, the menu's cap stays in charge
+        if (al2 != was) logf("antilag: %s", al2 ? "on" : "off");
+        if (FAILED(r) && !g_al2Logged) { logf("antilag: update failed %08x", r); g_al2Logged = true; }
+    }
     if (g_xessSc) { xessFgFrameStart(g_xeId); g_simOpen = true; }  // next frame starts here: XeLL's sleep after the pacing
     g_tUs[4] += lapUs(t);
     g_lastExit = t;
