@@ -203,8 +203,9 @@ also remove `WINEDLLOVERRIDES="dxgi=n,b"` from the game's Launch Options.
 - **Quitting can crash** while frame generation shuts down. Save before you quit.
 - **Linux with an NVIDIA card:** the game can freeze, most often as a save finishes loading or a battle starts.
   Players see the same freeze without the mod on NVIDIA's newer Linux drivers
-  ([Proton issue 74](https://github.com/ValveSoftware/Proton/issues/74)), and there's no fix from NVIDIA yet. If it
-  happens, close the game and start it again. One build of Proton Experimental also stops at the loading screen, so
+  ([Proton issue 74](https://github.com/ValveSoftware/Proton/issues/74)), and there's no fix from NVIDIA yet. The mod
+  turns off the driver feature linked to it (NVIDIA raw access chains), which made freezes at loading rarer in
+  testing, but it can still freeze, especially as a battle starts. If it happens, close the game and start it again. One build of Proton Experimental also stops at the loading screen, so
   use proton-cachyos.
 - **AMD FSR.** Tested on an NVIDIA GeForce RTX 5090 only, where AMD's files run FSR 3.1. Untested on AMD Radeon
   cards and with AMD's FSR 4. AMD's newest FSR on Radeon RX 9000 is untested too, and its frame generation may look

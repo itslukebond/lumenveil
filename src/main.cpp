@@ -14,6 +14,7 @@
 #include <unordered_map>
 #include "forward_list.h"
 #include "common.h"
+#include "proton_env.h"
 #include <wincodec.h>
 #include <algorithm>
 #include <vector>
@@ -1057,6 +1058,8 @@ static LONG CALLBACK onException(EXCEPTION_POINTERS* e) {
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
+static std::string g_protonEnvLog;  // written by protonEnv() in DllMain, logged by init(); empty on Windows
+
 static void init() {
     static std::once_flag once;
     std::call_once(once, [] {
@@ -1067,6 +1070,7 @@ static void init() {
         MH_CreateHookApi(L"kernel32", "GetProcAddress", (void*)hk_GetProcAddress, (void**)&o_GetProcAddress);
         MH_EnableHook(MH_ALL_HOOKS);
         logf("ffxv-dlss stage2 loaded (D3D12 presentation %s)", p12Enabled() ? "on" : "off");
+        if (!g_protonEnvLog.empty()) logf("proton: raw access chains off (%s)", g_protonEnvLog.c_str());
     });
 }
 
@@ -1091,9 +1095,27 @@ extern "C" HRESULT WINAPI CreateDXGIFactory2(UINT flags, REFIID riid, void** out
     return hr;
 }
 
+// Under Proton, turn off NVIDIA's raw access chains in DXVK and vkd3d-proton (see proton_env.h). Runs at the top of
+// DllMain, before DXVK's dxgi.dll loads: both layers read these variables later, when they start up. Windows: nothing.
+static void protonEnv() {
+    if (!GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "wine_get_version")) return;
+    auto apply = [](const char* var, proton_env::Outcome (*work)(const std::string&)) {
+        char buf[1024];
+        DWORD n = GetEnvironmentVariableA(var, buf, sizeof buf);
+        proton_env::Outcome o = n < sizeof buf ? work(std::string(buf, n)) : proton_env::Outcome{proton_env::Outcome::kTooLong, {}};
+        std::string s = var;
+        if (o.kind == proton_env::Outcome::kKept) return s + " kept (player value)";
+        if (o.kind == proton_env::Outcome::kTooLong) return s + " skipped (too long)";
+        if (!SetEnvironmentVariableA(var, o.value.c_str())) return s + " not set (error " + std::to_string(GetLastError()) + ")";
+        return s + "=" + o.value;
+    };
+    g_protonEnvLog = apply("VKD3D_DISABLE_EXTENSIONS", proton_env::vkd3dDisableList) + ", " + apply("DXVK_CONFIG", proton_env::dxvkConfig);
+}
+
 BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(inst);
+        protonEnv();
         g_self = inst;
         GetModuleFileNameW(inst, g_dir, MAX_PATH);
         *(wcsrchr(g_dir, L'\\') + 1) = 0;
