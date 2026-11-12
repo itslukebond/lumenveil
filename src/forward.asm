@@ -1,0 +1,72 @@
+; generated: passthrough thunks to the system dxgi.dll
+.data
+EXTERN g_real_ApplyCompatResolutionQuirking:QWORD
+EXTERN g_real_CompatString:QWORD
+EXTERN g_real_CompatValue:QWORD
+EXTERN g_real_DXGID3D10CreateDevice:QWORD
+EXTERN g_real_DXGID3D10CreateLayeredDevice:QWORD
+EXTERN g_real_DXGID3D10GetLayeredDeviceSize:QWORD
+EXTERN g_real_DXGID3D10RegisterLayers:QWORD
+EXTERN g_real_DXGIDeclareAdapterRemovalSupport:QWORD
+EXTERN g_real_DXGIDisableVBlankVirtualization:QWORD
+EXTERN g_real_DXGIDumpJournal:QWORD
+EXTERN g_real_DXGIGetDebugInterface1:QWORD
+EXTERN g_real_DXGIReportAdapterConfiguration:QWORD
+EXTERN g_real_PIXBeginCapture:QWORD
+EXTERN g_real_PIXEndCapture:QWORD
+EXTERN g_real_PIXGetCaptureState:QWORD
+EXTERN g_real_SetAppCompatStringPointer:QWORD
+EXTERN g_real_UpdateHMDEmulationStatus:QWORD
+.code
+ApplyCompatResolutionQuirking_thunk PROC
+  jmp qword ptr [g_real_ApplyCompatResolutionQuirking]
+ApplyCompatResolutionQuirking_thunk ENDP
+CompatString_thunk PROC
+  jmp qword ptr [g_real_CompatString]
+CompatString_thunk ENDP
+CompatValue_thunk PROC
+  jmp qword ptr [g_real_CompatValue]
+CompatValue_thunk ENDP
+DXGID3D10CreateDevice_thunk PROC
+  jmp qword ptr [g_real_DXGID3D10CreateDevice]
+DXGID3D10CreateDevice_thunk ENDP
+DXGID3D10CreateLayeredDevice_thunk PROC
+  jmp qword ptr [g_real_DXGID3D10CreateLayeredDevice]
+DXGID3D10CreateLayeredDevice_thunk ENDP
+DXGID3D10GetLayeredDeviceSize_thunk PROC
+  jmp qword ptr [g_real_DXGID3D10GetLayeredDeviceSize]
+DXGID3D10GetLayeredDeviceSize_thunk ENDP
+DXGID3D10RegisterLayers_thunk PROC
+  jmp qword ptr [g_real_DXGID3D10RegisterLayers]
+DXGID3D10RegisterLayers_thunk ENDP
+DXGIDeclareAdapterRemovalSupport_thunk PROC
+  jmp qword ptr [g_real_DXGIDeclareAdapterRemovalSupport]
+DXGIDeclareAdapterRemovalSupport_thunk ENDP
+DXGIDisableVBlankVirtualization_thunk PROC
+  jmp qword ptr [g_real_DXGIDisableVBlankVirtualization]
+DXGIDisableVBlankVirtualization_thunk ENDP
+DXGIDumpJournal_thunk PROC
+  jmp qword ptr [g_real_DXGIDumpJournal]
+DXGIDumpJournal_thunk ENDP
+DXGIGetDebugInterface1_thunk PROC
+  jmp qword ptr [g_real_DXGIGetDebugInterface1]
+DXGIGetDebugInterface1_thunk ENDP
+DXGIReportAdapterConfiguration_thunk PROC
+  jmp qword ptr [g_real_DXGIReportAdapterConfiguration]
+DXGIReportAdapterConfiguration_thunk ENDP
+PIXBeginCapture_thunk PROC
+  jmp qword ptr [g_real_PIXBeginCapture]
+PIXBeginCapture_thunk ENDP
+PIXEndCapture_thunk PROC
+  jmp qword ptr [g_real_PIXEndCapture]
+PIXEndCapture_thunk ENDP
+PIXGetCaptureState_thunk PROC
+  jmp qword ptr [g_real_PIXGetCaptureState]
+PIXGetCaptureState_thunk ENDP
+SetAppCompatStringPointer_thunk PROC
+  jmp qword ptr [g_real_SetAppCompatStringPointer]
+SetAppCompatStringPointer_thunk ENDP
+UpdateHMDEmulationStatus_thunk PROC
+  jmp qword ptr [g_real_UpdateHMDEmulationStatus]
+UpdateHMDEmulationStatus_thunk ENDP
+END

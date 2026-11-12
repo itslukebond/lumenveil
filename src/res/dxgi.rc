@@ -1,0 +1,2 @@
+// The menu logo, built into dxgi.dll so the release ships no extra file (menu.cpp loads resource 101).
+101 RCDATA "logo.png"
