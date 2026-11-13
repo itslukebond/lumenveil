@@ -15,6 +15,7 @@
 #include "forward_list.h"
 #include "common.h"
 #include "proton_env.h"
+#include "reshade_chain.h"
 #include <wincodec.h>
 #include <algorithm>
 #include <vector>
@@ -23,6 +24,7 @@
 FFXV_FORWARDS(DECL_REAL)
 
 static HMODULE g_realDxgi;
+static HMODULE g_reshade;  // ReShade, loaded by reshadeLoad() underneath this mod; null when not loaded
 static wchar_t g_dir[MAX_PATH];  // game folder, with trailing backslash
 static FILE* g_log;
 static std::mutex g_logMx;
@@ -852,9 +854,11 @@ static void onPresent(IDXGISwapChain* sc) {
         std::lock_guard<std::mutex> lk(g_logMx); fflush(g_log);
         last = now; lastFrame = g_frame;
     }
-    static bool homeDown;
+    static bool homeDown, homeLogged;
     bool home = (GetAsyncKeyState(VK_HOME) & 0x8000) != 0;
-    if (home && !homeDown) dlssToggle();
+    if (home && !homeDown && g_reshade) {  // Home opens ReShade's overlay: the DLSS toggle steps aside
+        if (!homeLogged) { logf("reshade: Home key left to ReShade"); homeLogged = true; }
+    } else if (home && !homeDown) dlssToggle();
     homeDown = home;
     if (g_frame % 30 == 0) {
         if (DeleteFileW(path(L"ffxv_dlss.toggle").c_str())) dlssToggle();
@@ -882,6 +886,16 @@ static HRESULT STDMETHODCALLTYPE hk_Present1(IDXGISwapChain1* sc, UINT si, UINT 
     return p12IsGame(sc) ? p12Present(si, f) : o_Present1(sc, si, f, p);
 }
 
+// With ReShade loaded, the game's swapchain reports the game's own window: the swapchain sits on the hidden window
+// (present12.cpp), and ReShade takes the window it reads keys and the mouse from out of GetDesc.
+using PFN_GetDesc = HRESULT(STDMETHODCALLTYPE*)(IDXGISwapChain*, DXGI_SWAP_CHAIN_DESC*);
+static PFN_GetDesc o_GetDesc;
+static HRESULT STDMETHODCALLTYPE hk_GetDesc(IDXGISwapChain* sc, DXGI_SWAP_CHAIN_DESC* d) {
+    HRESULT hr = o_GetDesc(sc, d);
+    if (SUCCEEDED(hr) && d && p12IsGame(sc)) d->OutputWindow = p12GameWindow();
+    return hr;
+}
+
 static void hookSwapChain(IDXGISwapChain* sc) {
     static std::once_flag once;
     std::call_once(once, [&] {
@@ -892,6 +906,7 @@ static void hookSwapChain(IDXGISwapChain* sc) {
             MH_CreateHook((*(void***)sc1)[22], (void*)hk_Present1, (void**)&o_Present1);
             sc1->Release();
         }
+        if (g_reshade) MH_CreateHook(vt[12], (void*)hk_GetDesc, (void**)&o_GetDesc);  // only with ReShade, see hk_GetDesc
         MH_EnableHook(MH_ALL_HOOKS);
         DXGI_SWAP_CHAIN_DESC d; sc->GetDesc(&d);
         logf("hooked swapchain %p %ux%u fmt %u buffers %u swapeffect %u windowed %d", (void*)sc,
@@ -979,7 +994,8 @@ extern ID3D12Device* g_d3d12;
 static bool calledByGame(void* ret) {
     HMODULE m = nullptr;
     GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCWSTR)ret, &m);
-    return m == g_exe;
+    // With ReShade loaded, the game's calls reach the real factory from ReShade's wrapper
+    return m == g_exe || (g_reshade && m == g_reshade);
 }
 
 // Called from Present: once the D3D12 device is lost, log why (and DRED's last operations / page fault, if enabled).
@@ -1076,22 +1092,120 @@ static void init() {
 
 template <class F> static F realFn(const char* name) { return (F)GetProcAddress(g_realDxgi, name); }
 
+// ---- ReShade underneath ---------------------------------------------------------
+// A player's ReShade dxgi.dll is kept by the installer as dxgi.dll.before_ffxv_dlss and loaded here, at start-up.
+// Before it loads, pass-through hooks go on the system's factory and D3D12 device exports. ReShade's own hooks then
+// sit on top of them, so these see the real objects: the factory hooks reach the real factory, and present12.cpp
+// creates its device through g_createDevice12, which ReShade never wraps, so ReShade sees only the game's swapchain.
+using PFN_CreateFactory = HRESULT(WINAPI*)(REFIID, void**);
+using PFN_CreateFactory2 = HRESULT(WINAPI*)(UINT, REFIID, void**);
+static PFN_CreateFactory o_bypassFactory, o_bypassFactory1;
+static PFN_CreateFactory2 o_bypassFactory2;
+static PFN_D3D12_CREATE_DEVICE o_bypassDevice;
+PFN_D3D12_CREATE_DEVICE g_createDevice12;  // set while ReShade is loaded (present12.cpp p12Init); null otherwise
+
+static HRESULT WINAPI bypassFactory(REFIID riid, void** out) {
+    HRESULT hr = o_bypassFactory(riid, out);
+    if (SUCCEEDED(hr) && out && *out) hookFactory((IUnknown*)*out);
+    return hr;
+}
+static HRESULT WINAPI bypassFactory1(REFIID riid, void** out) {
+    HRESULT hr = o_bypassFactory1(riid, out);
+    if (SUCCEEDED(hr) && out && *out) hookFactory((IUnknown*)*out);
+    return hr;
+}
+static HRESULT WINAPI bypassFactory2(UINT flags, REFIID riid, void** out) {
+    HRESULT hr = o_bypassFactory2(flags, riid, out);
+    if (SUCCEEDED(hr) && out && *out) hookFactory((IUnknown*)*out);
+    return hr;
+}
+static HRESULT WINAPI bypassDevice(IUnknown* adapter, D3D_FEATURE_LEVEL level, REFIID riid, void** out) {
+    return o_bypassDevice(adapter, level, riid, out);
+}
+
+// ProductName from a file's version information; empty when it has none.
+static std::wstring productName(const std::wstring& file) {
+    DWORD unused = 0, n = GetFileVersionInfoSizeW(file.c_str(), &unused);
+    if (!n) return {};
+    std::vector<char> buf(n);
+    if (!GetFileVersionInfoW(file.c_str(), 0, n, buf.data())) return {};
+    struct Lang { WORD lang, codePage; }* tr = nullptr;
+    UINT len = 0;
+    wchar_t key[64];
+    if (VerQueryValueW(buf.data(), L"\\VarFileInfo\\Translation", (void**)&tr, &len) && tr && len >= sizeof(Lang))
+        swprintf(key, 64, L"\\StringFileInfo\\%04x%04x\\ProductName", tr->lang, tr->codePage);
+    else
+        wcscpy_s(key, L"\\StringFileInfo\\040904b0\\ProductName");  // US English, Unicode: what most DLLs carry
+    wchar_t* v = nullptr;
+    if (!VerQueryValueW(buf.data(), key, (void**)&v, &len) || !v) return {};
+    return std::wstring(v, wcsnlen(v, len));
+}
+
+static void reshadeLoad() {
+    const std::wstring kept = path(L"dxgi.dll.before_ffxv_dlss");
+    const bool exists = GetFileAttributesW(kept.c_str()) != INVALID_FILE_ATTRIBUTES;
+    const int setting = GetPrivateProfileIntW(L"reshade", L"load", 1, path(L"ffxv_dlss.ini").c_str());
+    const auto d = reshade_chain::decide(setting, exists, exists ? productName(kept) : std::wstring());
+    if (!d.load) {
+        logf("reshade: not loaded (%s)", d.reason);
+        return;
+    }
+    HMODULE d3d12 = GetModuleHandleW(L"d3d12.dll");
+    struct Hook { void* target; void* detour; void** original; };
+    const Hook hooks[] = {
+        { (void*)GetProcAddress(g_realDxgi, "CreateDXGIFactory"), (void*)bypassFactory, (void**)&o_bypassFactory },
+        { (void*)GetProcAddress(g_realDxgi, "CreateDXGIFactory1"), (void*)bypassFactory1, (void**)&o_bypassFactory1 },
+        { (void*)GetProcAddress(g_realDxgi, "CreateDXGIFactory2"), (void*)bypassFactory2, (void**)&o_bypassFactory2 },
+        { d3d12 ? (void*)GetProcAddress(d3d12, "D3D12CreateDevice") : nullptr, (void*)bypassDevice, (void**)&o_bypassDevice },
+    };
+    int made = 0;
+    for (const Hook& h : hooks) {
+        if (!h.target || MH_CreateHook(h.target, h.detour, h.original) != MH_OK) break;
+        ++made;
+    }
+    if (made == 4 && MH_EnableHook(MH_ALL_HOOKS) != MH_OK) made = -1;
+    if (made != 4) {
+        for (int i = 0; i < (made < 0 ? 4 : made); ++i) { MH_DisableHook(hooks[i].target); MH_RemoveHook(hooks[i].target); }
+        logf("reshade: not loaded (the pass-through hooks could not be made)");
+        return;
+    }
+    // ReShade refuses to start under a name it does not expect unless this is set; it is put back straight after, so it
+    // never reaches a program the game starts.
+    wchar_t had[64];
+    const DWORD hadLen = GetEnvironmentVariableW(L"RESHADE_DISABLE_LOADING_CHECK", had, 64);
+    SetEnvironmentVariableW(L"RESHADE_DISABLE_LOADING_CHECK", L"1");
+    HMODULE mod = LoadLibraryW(kept.c_str());
+    const DWORD err = GetLastError();
+    SetEnvironmentVariableW(L"RESHADE_DISABLE_LOADING_CHECK", hadLen && hadLen < 64 ? had : nullptr);
+    if (!mod) {
+        for (const Hook& h : hooks) { MH_DisableHook(h.target); MH_RemoveHook(h.target); }
+        logf("reshade: load failed (error %lu)", err);
+        return;
+    }
+    g_reshade = mod;
+    g_createDevice12 = o_bypassDevice;
+    const char* const* version = (const char* const*)GetProcAddress(mod, "ReShadeVersion");
+    logf("reshade: loaded %s from dxgi.dll.before_ffxv_dlss", version && *version ? *version : "(version unknown)");
+    if (GetPrivateProfileIntW(L"INSTALL", L"HookStreamline", 0, path(L"ReShade.ini").c_str()))
+        logf("reshade: ReShade.ini has HookStreamline=1, so ReShade will not see the game; set it to 0 to use ReShade with Lumenveil");
+}
+
 extern "C" HRESULT WINAPI CreateDXGIFactory(REFIID riid, void** out) {
     init();
     HRESULT hr = realFn<decltype(&CreateDXGIFactory)>("CreateDXGIFactory")(riid, out);
-    if (SUCCEEDED(hr)) hookFactory((IUnknown*)*out);
+    if (SUCCEEDED(hr) && !g_reshade) hookFactory((IUnknown*)*out);  // with ReShade this is its wrapper: bypassFactory hooked the real one
     return hr;
 }
 extern "C" HRESULT WINAPI CreateDXGIFactory1(REFIID riid, void** out) {
     init();
     HRESULT hr = realFn<decltype(&CreateDXGIFactory1)>("CreateDXGIFactory1")(riid, out);
-    if (SUCCEEDED(hr)) hookFactory((IUnknown*)*out);
+    if (SUCCEEDED(hr) && !g_reshade) hookFactory((IUnknown*)*out);  // with ReShade this is its wrapper: bypassFactory hooked the real one
     return hr;
 }
 extern "C" HRESULT WINAPI CreateDXGIFactory2(UINT flags, REFIID riid, void** out) {
     init();
     HRESULT hr = realFn<decltype(&CreateDXGIFactory2)>("CreateDXGIFactory2")(flags, riid, out);
-    if (SUCCEEDED(hr)) hookFactory((IUnknown*)*out);
+    if (SUCCEEDED(hr) && !g_reshade) hookFactory((IUnknown*)*out);  // with ReShade this is its wrapper: bypassFactory hooked the real one
     return hr;
 }
 
@@ -1125,6 +1239,7 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID) {
 #define LOAD_REAL(n) g_real_##n = (void*)GetProcAddress(g_realDxgi, #n);
         FFXV_FORWARDS(LOAD_REAL)
         init();
+        reshadeLoad();
     }
     return TRUE;
 }

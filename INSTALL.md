@@ -87,7 +87,9 @@ Browse local files.
 - They copy the mod's files into the game folder and write a list of them to
   ffxv_dlss\installed_files.txt, so the uninstall script removes exactly those files and nothing else.
 - If another tool's dxgi.dll is already in the game folder, they keep it as dxgi.dll.before_ffxv_dlss and the
-  uninstall script puts it back.
+  uninstall script puts it back. If that tool is ReShade, Lumenveil loads it when the game starts, so ReShade keeps
+  working. After you update ReShade with its own setup, run the install script again: the newer ReShade replaces the
+  kept copy. Any other tool stays off while Lumenveil is installed. README.md, Works with other mods, has the details.
 - In the game's settings file GraphicsConfig.ini they set MaxFramerate=240 when it is lower, and keep the
   original file beside it as GraphicsConfig.ini.before_ffxv_dlss. Nothing else in that file changes.
 - The update script keeps each file it replaces as <name>.before_update and lists its changes in
@@ -105,7 +107,7 @@ If you changed the scaling mode in the mod's menu, the game still renders below 
 back to 100% in the game's graphics options. On Linux, also remove WINEDLLOVERRIDES="dxgi=n,b" from the game's Launch Options.
 
 To uninstall by hand, delete dxgi.dll, ffxv_dlss.ini, ffxv_dlss.log and the ffxv_dlss folder from the game folder.
-If dxgi.dll.before_ffxv_dlss is there, rename it back to dxgi.dll.
+If dxgi.dll.before_ffxv_dlss is there (another tool's dxgi.dll, ReShade for example), rename it back to dxgi.dll.
 
 ## Updating DLSS, FSR and XeSS
 

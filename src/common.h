@@ -64,6 +64,7 @@ void p12Abort();                         // the game's swapchain could not be cr
 void p12Attach(IDXGISwapChain* game);
 bool p12Owns(IDXGISwapChain* sc);        // our D3D12 swapchain: hooks pass it straight through
 bool p12IsGame(IDXGISwapChain* sc);
+HWND p12GameWindow();                     // the game's own (visible) window while the presenter runs
 HRESULT p12Present(UINT syncInterval, UINT flags);
 bool p12Busy();                          // creating our swapchain: DXGI hooks pass straight through
 void p12WaitInputsFree(ID3D11DeviceContext* ctx);  // before overwriting frame-generation inputs

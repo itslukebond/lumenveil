@@ -1418,6 +1418,11 @@ function Write-CopyFailed([string]$File, $Problem) {
     $bat = @{ install = 'install.bat'; uninstall = 'uninstall.bat'; update = 'update.bat'; undo = 'undo-update.bat' }[$Action]
     Write-Note ('If the game folder is protected, right-click {0} and choose Run as administrator.' -f $bat)
 }
+# A 64-bit DLL whose ProductName is ReShade (any case, spaces around it ignored).
+function Test-IsReShade([string]$Path) {
+    $i = Get-PeInfo $Path
+    return $i.Bad -eq '' -and $i.Product.Trim().ToLowerInvariant() -eq 'reshade'
+}
 function Install-ModFiles {
     if (-not (Test-Path -LiteralPath $Payload -PathType Container)) {
         Write-Note "The release's game folder is missing. Extract the whole zip, then run this again."
@@ -1430,10 +1435,17 @@ function Install-ModFiles {
     $keptName = 'dxgi.dll' + $Keep
     $kept = Get-GamePath $keptName
     $foreign = (Test-Path -LiteralPath $dxgi -PathType Leaf) -and -not (Test-HasMark $dxgi)
+    $reshade = $foreign -and (Test-IsReShade $dxgi)
+    $newer = $false
     if ($foreign -and (Test-Path -LiteralPath $kept)) {
-        Write-Note ("The game folder holds another tool's dxgi.dll, and {0} is there too." -f $keptName)
-        Write-Note 'Move one of them out of the game folder, then run this again. Nothing was changed.'
-        return 4
+        # A newer ReShade over the ReShade this mod keeps (ReShade's setup run again): it replaces the kept copy.
+        if ($reshade -and (Test-Path -LiteralPath $kept -PathType Leaf) -and (Test-IsReShade $kept)) {
+            $newer = $true
+        } else {
+            Write-Note ("The game folder holds another tool's dxgi.dll, and {0} is there too." -f $keptName)
+            Write-Note 'Move one of them out of the game folder, then run this again. Nothing was changed.'
+            return 4
+        }
     }
     try {
         [void][System.IO.Directory]::CreateDirectory((Get-GamePath 'ffxv_dlss'))
@@ -1443,9 +1455,20 @@ function Install-ModFiles {
         return 4
     }
     if ($foreign) {
-        try { [System.IO.File]::Move($dxgi, $kept) } catch { Write-CopyFailed 'dxgi.dll' $_; return 4 }
-        Write-Note ("Another tool's dxgi.dll was in the game folder. It is kept as {0}" -f $keptName)
-        Write-Note 'and comes back when you uninstall.'
+        # A rename on the same folder: the kept copy is the old file or the new one, never part of either.
+        try {
+            if ($newer) { [System.IO.File]::Replace($dxgi, $kept, [NullString]::Value) } else { [System.IO.File]::Move($dxgi, $kept) }
+        } catch { Write-CopyFailed 'dxgi.dll' $_; return 4 }
+        if ($newer) {
+            Write-Note 'A newer ReShade was found in the game folder. It replaces the copy Lumenveil loads.'
+        } elseif ($reshade) {
+            Write-Note ('ReShade was found in the game folder. It is kept as {0},' -f $keptName)
+            Write-Note 'Lumenveil loads it when the game starts, and it comes back when you uninstall.'
+        } else {
+            Write-Note ("Another tool's dxgi.dll was in the game folder. It is kept as {0}" -f $keptName)
+            Write-Note 'and comes back when you uninstall. Lumenveil does not load it, so that tool is off'
+            Write-Note 'while Lumenveil is installed.'
+        }
     }
     foreach ($f in $files) {
         try {

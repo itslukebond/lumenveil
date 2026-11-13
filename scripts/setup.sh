@@ -1129,6 +1129,14 @@ copy_failed() { # copy_failed FILE MESSAGE
     note "Could not copy $1: $2"
     note "Check that you can write to the game folder, then run this again."
 }
+is_reshade() { # is_reshade FILE: a 64-bit DLL whose ProductName is ReShade (any case, spaces around it ignored)
+    local p
+    pe_info "$1" || return 1
+    p=${pe_product,,}
+    p=${p#"${p%%[![:space:]]*}"}
+    p=${p%"${p##*[![:space:]]}"}
+    [ "$p" = reshade ]
+}
 install_files() {
     local f err files=()
     if [ ! -d "$payload" ]; then
@@ -1136,21 +1144,36 @@ install_files() {
         return 4
     fi
     mapfile -t files < <(cd "$payload" && find . -type f -printf '%P\n' | LC_ALL=C sort)
-    local foreign=0
+    local foreign=0 reshade=0
     if [ -f "$game/dxgi.dll" ] && ! grep -qaF -- "$mark" "$game/dxgi.dll"; then
-        if [ -e "$game/dxgi.dll$keep" ]; then
-            note "The game folder holds another tool's dxgi.dll, and dxgi.dll$keep is there too."
-            note "Move one of them out of the game folder, then run this again. Nothing was changed."
-            return 4
-        fi
+        is_reshade "$game/dxgi.dll" && reshade=1
         foreign=1
+        if [ -e "$game/dxgi.dll$keep" ]; then
+            # A newer ReShade over the ReShade this mod keeps (ReShade's setup run again): it replaces the kept copy.
+            if [ $reshade = 1 ] && [ -f "$game/dxgi.dll$keep" ] && is_reshade "$game/dxgi.dll$keep"; then
+                foreign=2
+            else
+                note "The game folder holds another tool's dxgi.dll, and dxgi.dll$keep is there too."
+                note "Move one of them out of the game folder, then run this again. Nothing was changed."
+                return 4
+            fi
+        fi
     fi
     err=$(mkdir -p -- "$game/ffxv_dlss" 2>&1) || { copy_failed ffxv_dlss "$err"; return 4; }
     err=$(record_add "${files[@]}" "$record_rel" 2>&1) || { copy_failed "$record_rel" "$err"; return 4; }
-    if [ $foreign = 1 ]; then
-        err=$(mv -- "$game/dxgi.dll" "$game/dxgi.dll$keep" 2>&1) || { copy_failed dxgi.dll "$err"; return 4; }
-        note "Another tool's dxgi.dll was in the game folder. It is kept as dxgi.dll$keep"
-        note "and comes back when you uninstall."
+    if [ $foreign != 0 ]; then
+        # A rename on the same folder: the kept copy is the old file or the new one, never part of either.
+        err=$(mv -f -- "$game/dxgi.dll" "$game/dxgi.dll$keep" 2>&1) || { copy_failed dxgi.dll "$err"; return 4; }
+        if [ $foreign = 2 ]; then
+            note "A newer ReShade was found in the game folder. It replaces the copy Lumenveil loads."
+        elif [ $reshade = 1 ]; then
+            note "ReShade was found in the game folder. It is kept as dxgi.dll$keep,"
+            note "Lumenveil loads it when the game starts, and it comes back when you uninstall."
+        else
+            note "Another tool's dxgi.dll was in the game folder. It is kept as dxgi.dll$keep"
+            note "and comes back when you uninstall. Lumenveil does not load it, so that tool is off"
+            note "while Lumenveil is installed."
+        fi
     fi
     # Each file goes to a temporary name beside its target and is renamed into place only once it is whole, so a
     # copy cut short (a full disk) never leaves a broken file under a real name.

@@ -31,6 +31,7 @@ https://github.com/user-attachments/assets/4d549f08-57ef-4710-8c7c-9c15e43cc003
 - [Install](#install)
 - [Using the mod (Insert key)](#using-the-mod-insert-key)
 - [Uninstall](#uninstall)
+- [Works with other mods](#works-with-other-mods)
 - [Known issues](#known-issues)
 - [Building from source](#building-from-source)
 - [Licence](#licence)
@@ -200,6 +201,25 @@ Close the game and run `uninstall.bat` (Windows) or `bash uninstall.sh` (Linux) 
 By hand: delete `dxgi.dll`, `ffxv_dlss.ini`, `ffxv_dlss.log` and the `ffxv_dlss` folder from the game folder. If you
 changed the scaling mode, set the render scale back in the game's options (or `RenderingResolutionRatio=100`). On Linux,
 also remove `WINEDLLOVERRIDES="dxgi=n,b"` from the game's Launch Options.
+
+---
+
+## Works with other mods
+
+Content mods (outfits, textures, field of view, mod menus installed with Flagrum) change the game's own files and work
+alongside Lumenveil. Tools that load as the game's `dxgi.dll`, as Lumenveil does, are a different matter:
+
+- **ReShade** works with Lumenveil. Install ReShade into the game folder first (DirectX 10/11/12, so it is
+  `dxgi.dll`), then Lumenveil. The install script keeps ReShade's `dxgi.dll` as `dxgi.dll.before_ffxv_dlss` and
+  Lumenveil loads it when the game starts, so ReShade's effects show in the picture Lumenveil presents. Home still
+  opens ReShade's overlay: Lumenveil's Home shortcut for DLSS is off while ReShade is loaded. To add or update ReShade
+  later, run ReShade's setup, then Lumenveil's install script again. To stop Lumenveil loading ReShade, add `load=0`
+  under `[reshade]` in `ffxv_dlss.ini`. On Linux nothing extra is needed: the launch option above covers both.
+- **RenoDX** runs inside ReShade (ReShade's add-on edition), so it loads along with ReShade. Untested with Lumenveil
+  so far.
+- **Luma** does its own upscaling, so use it instead of Lumenveil, not with it.
+- **Special K** and **OptiScaler** don't work together with Lumenveil. The install script keeps their `dxgi.dll` and
+  the uninstall script puts it back, but Lumenveil doesn't load it, so they stay off while Lumenveil is installed.
 
 ---
 

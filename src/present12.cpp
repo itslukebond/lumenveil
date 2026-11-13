@@ -701,6 +701,9 @@ bool p12Busy() { return g_busy; }
 // Once active, every swapchain but the game's is ours or Streamline's internal one: hooks pass them straight through.
 bool p12Owns(IDXGISwapChain* sc) { return g_game && sc != g_game; }
 bool p12IsGame(IDXGISwapChain* sc) { return sc && sc == g_game; }
+HWND p12GameWindow() { return g_wnd; }
+
+extern PFN_D3D12_CREATE_DEVICE g_createDevice12;  // main.cpp
 
 HWND p12Init(IUnknown* dev, IDXGIFactory2* f, PFN_CreateSCHwnd create, HWND wnd, const DXGI_SWAP_CHAIN_DESC1* desc) {
     if (g_d3d12) return reattach(wnd, desc);
@@ -741,7 +744,10 @@ HWND p12Init(IUnknown* dev, IDXGIFactory2* f, PFN_CreateSCHwnd create, HWND wnd,
         dred->Release();
         logf("d3d12: DRED breadcrumbs + page faults on");
     }
-    hr = D3D12CreateDevice(ad, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&g_d3d12));
+    if (g_createDevice12)  // ReShade loaded (main.cpp): past its hook, so it never wraps our device or swapchain
+        hr = g_createDevice12(ad, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&g_d3d12));
+    else
+        hr = D3D12CreateDevice(ad, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&g_d3d12));
     ad->Release();
     // Streamline must see the device first and the present queue's creation (through its proxy device).
     ID3D12Device* queueDev = g_d3d12;

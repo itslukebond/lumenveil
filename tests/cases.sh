@@ -976,11 +976,12 @@ known = {
     'libxess_dx11.dll': ('Intel Corporation', 'XeSS SDK', 'XeSS SDK', 'libxess_dx11.dll', 'Intel Corporation'),
     'libxess_fg.dll': ('Intel Corporation', 'XeSS Frame Generation SDK', 'XeSS Frame Generation SDK', 'libxess_fg.dll', 'Intel Corporation'),
     'libxell.dll': ('Intel Corporation', 'XeLL SDK', 'XeLL SDK', 'libxell.dll', 'Intel Corporation'),
+    'dxgi.dll': ('crosire', 'ReShade', "crosire's ReShade post-processing injector for 64-bit", 'ReShade64.dll', 'none'),
 }
 company, product, desc, orig, org = known[name]
 company, product = o.get('company', company), o.get('product', product)
 desc, orig, org = o.get('desc', desc), o.get('orig', orig), o.get('org', org)
-minimum = {'amd_fidelityfx_loader_dx12.dll': 16384, 'libxell.dll': 131072}.get(name, 1048576)
+minimum = {'amd_fidelityfx_loader_dx12.dll': 16384, 'libxell.dll': 131072, 'dxgi.dll': 65536}.get(name, 1048576)
 tag = ('%s %s %s ' % (name, version, o.get('tag', ''))).encode()
 if o.get('text'):
     open(out, 'wb').write((b'This page could not be found. ' + tag) * (minimum // 30 + 100))
@@ -1594,6 +1595,116 @@ case_t40() {
     [ "$i" = sh ] && t "T40 sh disk full at the record write: that is where it stopped" has "Could not copy ffxv_dlss/installed_files.txt"
 }
 
+# ---- T41 ReShade as dxgi.dll: kept and loaded by the mod, a newer one replaces the kept copy ------------------------------------
+# reshade OUT VERSION [key=value...]: a 64-bit DLL whose version resource says ReShade (product=... to change it)
+reshade() { mkpe "$1" dxgi.dll "$2" "${@:3}"; }
+case_t41() {
+    local i=$1 inner=$T/t41-inner.sh big=$T/release-big size p
+    # ReShade, nothing kept yet: kept, the mod's dxgi.dll in place, the player told it keeps working; uninstall puts it back
+    mkcase "t41a-$i"
+    reshade "$C/rs1.dll" 6.3.3.0
+    cp "$C/rs1.dll" "$GAME/dxgi.dll"
+    run "$i" install
+    t "T41 $i ReShade: exit 0" eq "$RC" 0
+    t "T41 $i ReShade: kept under the backup name" same "$C/rs1.dll" "$GAME/dxgi.dll.before_ffxv_dlss"
+    t "T41 $i ReShade: mod dxgi.dll in place" same "$REL/game/dxgi.dll" "$GAME/dxgi.dll"
+    t "T41 $i ReShade: player told it was found" has "ReShade was found in the game folder."
+    t "T41 $i ReShade: player told the mod loads it" has "Lumenveil loads it when the game starts"
+    t "T41 $i ReShade: not called another tool" lacks "Another tool's dxgi.dll"
+    run "$i" install
+    t "T41 $i ReShade, second install: exit 0" eq "$RC" 0
+    t "T41 $i ReShade, second install: kept copy untouched" same "$C/rs1.dll" "$GAME/dxgi.dll.before_ffxv_dlss"
+    # the player runs ReShade's setup again (a newer ReShade as dxgi.dll), then the mod's install
+    reshade "$C/rs2.dll" 6.4.1.0
+    cp "$C/rs2.dll" "$GAME/dxgi.dll"
+    run "$i" install
+    t "T41 $i newer ReShade: exit 0" eq "$RC" 0
+    t "T41 $i newer ReShade: replaces the kept copy" same "$C/rs2.dll" "$GAME/dxgi.dll.before_ffxv_dlss"
+    t "T41 $i newer ReShade: mod dxgi.dll in place" same "$REL/game/dxgi.dll" "$GAME/dxgi.dll"
+    t "T41 $i newer ReShade: player told" has "A newer ReShade was found in the game folder."
+    t "T41 $i newer ReShade: no part files" eval '[ -z "$(find "$GAME" -name "*ffxv_dlss_part*" -print -quit)" ]'
+    run "$i" uninstall
+    t "T41 $i ReShade: uninstall exit 0" eq "$RC" 0
+    t "T41 $i ReShade: uninstall puts the newer ReShade back byte for byte" same "$C/rs2.dll" "$GAME/dxgi.dll"
+    t "T41 $i ReShade: uninstall leaves no kept copy" test ! -e "$GAME/dxgi.dll.before_ffxv_dlss"
+    # ProductName with other case and trailing spaces is still ReShade; "ReShade Effects" is not
+    mkcase "t41b-$i"
+    reshade "$C/rs.dll" 6.3.3.0 'product=reshade  '
+    cp "$C/rs.dll" "$GAME/dxgi.dll"
+    run "$i" install
+    t "T41 $i 'reshade  ': exit 0" eq "$RC" 0
+    t "T41 $i 'reshade  ': taken as ReShade" has "ReShade was found in the game folder."
+    mkcase "t41c-$i"
+    reshade "$C/other.dll" 1.0.0.0 'product=ReShade Effects'
+    cp "$C/other.dll" "$GAME/dxgi.dll"
+    run "$i" install
+    t "T41 $i 'ReShade Effects': exit 0" eq "$RC" 0
+    t "T41 $i 'ReShade Effects': kept as another tool" same "$C/other.dll" "$GAME/dxgi.dll.before_ffxv_dlss"
+    t "T41 $i 'ReShade Effects': not taken as ReShade" lacks "ReShade was found"
+    t "T41 $i 'ReShade Effects': player told it is not loaded" has "Lumenveil does not load it"
+    # another tool's dxgi.dll that is not a DLL at all: as today, plus the line that it is not loaded
+    mkcase "t41d-$i"
+    printf 'MZ another tool proxy\n' > "$C/foreign.dll"
+    cp "$C/foreign.dll" "$GAME/dxgi.dll"
+    run "$i" install
+    t "T41 $i other tool: exit 0" eq "$RC" 0
+    t "T41 $i other tool: kept" same "$C/foreign.dll" "$GAME/dxgi.dll.before_ffxv_dlss"
+    t "T41 $i other tool: player told it is not loaded" has "Lumenveil does not load it"
+    # mixed pairs refuse and change nothing
+    for p in other-over-reshade reshade-over-other; do
+        mkcase "t41e-$i-$p"
+        reshade "$C/rs.dll" 6.3.3.0
+        printf 'MZ another tool proxy\n' > "$C/foreign.dll"
+        if [ "$p" = other-over-reshade ]; then
+            cp "$C/rs.dll" "$GAME/dxgi.dll.before_ffxv_dlss"; cp "$C/foreign.dll" "$GAME/dxgi.dll"
+        else
+            cp "$C/foreign.dll" "$GAME/dxgi.dll.before_ffxv_dlss"; cp "$C/rs.dll" "$GAME/dxgi.dll"
+        fi
+        before=$(snap "$GAME")
+        run "$i" install
+        t "T41 $i $p: exit 4" eq "$RC" 4
+        t "T41 $i $p: nothing changed" eq "$(snap "$GAME")" "$before"
+    done
+    # disk full after the newer ReShade replaced the kept copy: the kept copy is one ReShade or the other, whole,
+    # and uninstall gives back a whole ReShade
+    if [ ! -d "$big" ]; then
+        cp -a "$REL" "$big" && chmod -R u+w "$big" &&
+            python3 -I -c 'import sys; open(sys.argv[1], "wb").write(b"MZ" + b"\0" * 3000000 + b" ffxv-dlss build 3\n")' "$big/game/dxgi.dll" &&
+            chmod -R a-w "$big" || { no "T41 release with a large dxgi.dll could not be made"; return; }
+    fi
+    cat > "$inner" <<'EOF'
+# inner IMPL REL SRC GAME AFTER STEAM DOCS DL PWSH: install on a small tmpfs, copy the result out, uninstall, copy again
+impl=$1 rel=$2 src=$3 game=$4 after=$5 steam=$6 docs=$7 dl=$8 pwsh=$9
+cp -a "$src/." "$game/" || exit 99
+go() {
+    if [ "$impl" = sh ]; then bash "$rel/$1.sh" < /dev/null
+    else "$pwsh" -NoProfile -File "$rel/scripts/setup.ps1" -Action "$1" -SteamRoot "$steam" -DocumentsDir "$docs" -DownloadsDir "$dl" < /dev/null; fi
+}
+go install; echo "rc-install $?"
+cp -a "$game/." "$after.install/"
+go uninstall; echo "rc-uninstall $?"
+cp -a "$game/." "$after/"
+EOF
+    mkcase "t41f-$i"
+    reshade "$C/rs1.dll" 6.3.3.0; reshade "$C/rs2.dll" 6.4.1.0
+    cp "$C/rs1.dll" "$GAME/dxgi.dll"
+    run "$i" install
+    cp "$C/rs2.dll" "$GAME/dxgi.dll"
+    mv "$GAME" "$C/game-src" && mkdir "$GAME" "$C/after" "$C/after.install"
+    size=$(( $(du -s --block-size=1 "$C/game-src" | cut -f1) + 1048576 ))
+    N=$((N + 1)); OUT=$C/out.$N.txt
+    (cd "$C" && env HOME="$H" bwrap --ro-bind / / --dev /dev --proc /proc --bind "$T" "$T" --size "$size" --tmpfs "$GAME" \
+        bash "$inner" "$i" "$big" "$C/game-src" "$GAME" "$C/after" "$STEAM" "$DOCS" "$DL" "$PWSH" > "$OUT" 2>&1)
+    t "T41 $i disk full after the replace: install exit 4" has "rc-install 4"
+    t "T41 $i disk full after the replace: the replace ran before the disk filled" has "A newer ReShade was found in the game folder."
+    t "T41 $i disk full after the replace: kept copy is a whole ReShade" \
+        eval 'cmp -s "$C/rs2.dll" "$C/after.install/dxgi.dll.before_ffxv_dlss" || cmp -s "$C/rs1.dll" "$C/after.install/dxgi.dll.before_ffxv_dlss"'
+    t "T41 $i disk full after the replace: no part files" eval '[ -z "$(find "$C/after.install" -name "*ffxv_dlss_part*" -print -quit)" ]'
+    t "T41 $i disk full after the replace: uninstall exit 0" has "rc-uninstall 0"
+    t "T41 $i disk full after the replace: uninstall gives back a whole ReShade" \
+        eval 'cmp -s "$C/rs2.dll" "$C/after/dxgi.dll" || cmp -s "$C/rs1.dll" "$C/after/dxgi.dll"'
+}
+
 # ---- T37 install does not undo an update ------------------------------------------------------------------------------------------------
 case_t37() {
     local i=$1
@@ -2004,7 +2115,7 @@ groups=${*:-sh ps static package stress}
 for g in $groups; do
     case $g in
         sh | ps)
-            for c in t1 t2 t3 t4 t5 t6 t7 t9 t10 t11 t12 t14 t20 t21 t22 t24 t25 t26 t27 t28 t29 t30 t31 t32 t33 t34 t35 t36 t37 t38 t40; do
+            for c in t1 t2 t3 t4 t5 t6 t7 t9 t10 t11 t12 t14 t20 t21 t22 t24 t25 t26 t27 t28 t29 t30 t31 t32 t33 t34 t35 t36 t37 t38 t40 t41; do
                 "case_$c" "$g"
             done
             case_t12b "$g"
