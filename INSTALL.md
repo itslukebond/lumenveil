@@ -236,6 +236,11 @@ Use this if a script does not work for you. The game folder is the folder that h
   [d3d12]
   present=0
 
+- Insert does nothing with OptiScaler or Special K installed: they must load under another file name than dxgi.dll
+  (OptiScaler as version.dll, for example), with their own upscaling, frame generation and presenting options off.
+  ffxv_dlss.log then has a line starting "dxgi: the game's swap chain was passed on by", then "d3d12: init". Lines
+  with "not taken" are about other swap chains the tool made, and can be normal. With no "passed on by" line, the mod
+  did not find the game's picture, often because the other tool draws it itself, and the mod's menu stays off.
 - The mod's log is ffxv_dlss.log in the game folder. Include it when you report a problem.
 
 ## Known issues

@@ -220,8 +220,15 @@ alongside Lumenveil. Tools that load as the game's `dxgi.dll`, as Lumenveil does
 - **RenoDX** runs inside ReShade (ReShade's add-on edition), so it loads along with ReShade. Untested with Lumenveil
   so far.
 - **Luma** does its own upscaling, so use it instead of Lumenveil, not with it.
-- **Special K** and **OptiScaler** don't work together with Lumenveil. The install script keeps their `dxgi.dll` and
-  the uninstall script puts it back, but Lumenveil doesn't load it, so they stay off while Lumenveil is installed.
+- **Special K** and **OptiScaler** can run beside Lumenveil when they load under another file name, not as
+  `dxgi.dll` (OptiScaler as `version.dll` or `winmm.dll`, for example). Turn off their own upscaling, frame generation
+  and presenting options: Lumenveil does those. On Linux, add the file to the launch option too, for example
+  `WINEDLLOVERRIDES="dxgi=n,b;version=n,b" %command%`. When it works, `ffxv_dlss.log` has the line
+  `dxgi: the game's swap chain was passed on by` with the tool's file name, then `d3d12: init`, and Insert opens the
+  menu as usual. Lines with `not taken` are about other swap chains the tool made, and can be normal. If the log has
+  no `passed on by` line, Lumenveil did not find the game's picture, often because the other tool draws it itself:
+  Lumenveil's menu, fps counter and frame generation then stay off. Untested with Lumenveil so far. Installed as `dxgi.dll`, they stay off while Lumenveil is
+  installed: the install script keeps their file and the uninstall script puts it back, but Lumenveil doesn't load it.
 
 ---
 

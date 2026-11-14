@@ -18,6 +18,7 @@
 #include "game_sharpen.h"
 #include "proton_env.h"
 #include "reshade_chain.h"
+#include "swapchain_caller.h"
 #include <wincodec.h>
 #include <algorithm>
 #include <vector>
@@ -1180,15 +1181,41 @@ static void hookSwapChain(IDXGISwapChain* sc) {
 using PFN_CreateSC = HRESULT(STDMETHODCALLTYPE*)(IDXGIFactory*, IUnknown*, DXGI_SWAP_CHAIN_DESC*, IDXGISwapChain**);
 static PFN_CreateSC o_CreateSC; static PFN_CreateSCHwnd o_CreateSCHwnd;
 static bool calledByGame(void* ret);
+static bool takeAsGame(void* ret, IUnknown* device, HWND w, bool* viaWrapper);
+
+// A DXGI wrapper (OptiScaler, Special K) keeps the game's swap chain and reads its window from it: while our presenter
+// has it, GetDesc and GetHwnd report the game's own window, as hk_GetDesc does for ReShade.
+using PFN_GetHwnd = HRESULT(STDMETHODCALLTYPE*)(IDXGISwapChain1*, HWND*);
+static PFN_GetHwnd o_GetHwnd;
+static HRESULT STDMETHODCALLTYPE hk_GetHwnd(IDXGISwapChain1* sc, HWND* w) {
+    HRESULT hr = o_GetHwnd(sc, w);
+    if (SUCCEEDED(hr) && w && p12IsGame(sc)) *w = p12GameWindow();
+    return hr;
+}
+static void hookWrapperView(IDXGISwapChain* sc) {
+    static std::once_flag once;
+    std::call_once(once, [&] {
+        void** vt = *(void***)sc;
+        if (!o_GetDesc) MH_CreateHook(vt[12], (void*)hk_GetDesc, (void**)&o_GetDesc);
+        IDXGISwapChain1* sc1 = nullptr;
+        if (SUCCEEDED(sc->QueryInterface(__uuidof(IDXGISwapChain1), (void**)&sc1))) {
+            MH_CreateHook((*(void***)sc1)[20], (void*)hk_GetHwnd, (void**)&o_GetHwnd);
+            sc1->Release();
+        }
+        MH_EnableHook(MH_ALL_HOOKS);
+    });
+}
 
 // [d3d12] present=1: the game's swapchain goes on a hidden window and ours takes the real one (present12.cpp).
-static void createdBy(IDXGISwapChain* sc, bool p12) {
+static void createdBy(IDXGISwapChain* sc, bool p12, bool viaWrapper) {
     hookSwapChain(sc);  // our own D3D12 swapchain never gets here: p12Init creates it through the original function
     if (p12) p12Attach(sc);
+    if (p12 && viaWrapper) hookWrapperView(sc);
 }
 static HRESULT STDMETHODCALLTYPE hk_CreateSC(IDXGIFactory* f, IUnknown* d, DXGI_SWAP_CHAIN_DESC* desc, IDXGISwapChain** sc) {
     if (p12Busy()) return o_CreateSC(f, d, desc, sc);  // Streamline creating its own swapchain inside p12Init
-    bool game = calledByGame(_ReturnAddress());
+    bool viaWrapper = false;
+    bool game = takeAsGame(_ReturnAddress(), d, desc ? desc->OutputWindow : nullptr, &viaWrapper);
     HWND hidden = nullptr;
     DXGI_SWAP_CHAIN_DESC dd = desc ? *desc : DXGI_SWAP_CHAIN_DESC{};
     IDXGIFactory2* f2 = nullptr;
@@ -1201,17 +1228,18 @@ static HRESULT STDMETHODCALLTYPE hk_CreateSC(IDXGIFactory* f, IUnknown* d, DXGI_
     }
     HRESULT hr = o_CreateSC(f, d, desc ? &dd : nullptr, sc);
     if (hidden && FAILED(hr)) { p12Abort(); hidden = nullptr; hr = o_CreateSC(f, d, desc, sc); }
-    if (SUCCEEDED(hr) && sc && *sc) createdBy(*sc, hidden != nullptr);
+    if (SUCCEEDED(hr) && sc && *sc) createdBy(*sc, hidden != nullptr, viaWrapper);
     return hr;
 }
 static HRESULT STDMETHODCALLTYPE hk_CreateSCHwnd(IDXGIFactory2* f, IUnknown* d, HWND w, const DXGI_SWAP_CHAIN_DESC1* desc,
                                                  const DXGI_SWAP_CHAIN_FULLSCREEN_DESC* fs, IDXGIOutput* o, IDXGISwapChain1** sc) {
     if (p12Busy()) return o_CreateSCHwnd(f, d, w, desc, fs, o, sc);
-    bool game = calledByGame(_ReturnAddress());
+    bool viaWrapper = false;
+    bool game = takeAsGame(_ReturnAddress(), d, w, &viaWrapper);
     HWND hidden = game && desc && p12Enabled() ? p12Init(d, f, o_CreateSCHwnd, w, desc) : nullptr;
     HRESULT hr = o_CreateSCHwnd(f, d, hidden ? hidden : w, desc, fs, o, sc);
     if (hidden && FAILED(hr)) { p12Abort(); hidden = nullptr; hr = o_CreateSCHwnd(f, d, w, desc, fs, o, sc); }
-    if (SUCCEEDED(hr) && sc && *sc) createdBy(*sc, hidden != nullptr);
+    if (SUCCEEDED(hr) && sc && *sc) createdBy(*sc, hidden != nullptr, viaWrapper);
     return hr;
 }
 
@@ -1253,6 +1281,73 @@ static bool calledByGame(void* ret) {
     GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCWSTR)ret, &m);
     // With ReShade loaded, the game's calls reach the real factory from ReShade's wrapper
     return m == g_exe || (g_reshade && m == g_reshade);
+}
+
+// What a code address belongs to (swapchain_caller.h); *m gets its module, null when none.
+static swapchain_caller::Mod moduleOf(void* addr, HMODULE* m) {
+    using swapchain_caller::Mod;
+    *m = nullptr;
+    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCWSTR)addr, m);
+    if (*m && *m == g_exe) return Mod::kGame;
+    if (*m && *m == g_reshade) return Mod::kReShade;
+    if (*m && *m == g_self) return Mod::kOurs;
+    wchar_t fn[MAX_PATH], sys[MAX_PATH] = {}, win[MAX_PATH] = {};
+    if (!*m || !GetModuleFileNameW(*m, fn, MAX_PATH)) return Mod::kNone;
+    GetSystemDirectoryW(sys, MAX_PATH);
+    GetWindowsDirectoryW(win, MAX_PATH);
+    return swapchain_caller::classify(fn, sys, win, path(L"ffxv_dlss\\"));
+}
+
+// The modules of the return chain from the hook's caller upwards: out[0] is ret's. 0 when the captured stack does
+// not hold ret.
+static int callerChain(void* ret, swapchain_caller::Mod* out, int cap) {
+    void* frames[32];
+    const int n = RtlCaptureStackBackTrace(0, 32, frames, nullptr);
+    int at = 0;
+    while (at < n && frames[at] != ret) ++at;
+    int k = 0;
+    HMODULE m;
+    for (int i = at; i < n && k < cap; ++i) out[k++] = moduleOf(frames[i], &m);
+    return k;
+}
+
+// Why a swap chain passed on by a wrapper is not the game's (swapchain_caller::refuse), or nullptr.
+static const char* wrapperRefusal(IUnknown* device, HWND w) {
+    if (!w || !IsWindow(w)) return "no window";
+    swapchain_caller::Target t = {};
+    ID3D11Device* d11 = nullptr;
+    t.d3d11Device = device && SUCCEEDED(device->QueryInterface(IID_PPV_ARGS(&d11)));
+    if (d11) d11->Release();
+    t.topLevel = GetAncestor(w, GA_ROOT) == w;
+    t.toolWindow = (GetWindowLongPtrW(w, GWL_EXSTYLE) & WS_EX_TOOLWINDOW) != 0;
+    RECT r = {};
+    GetClientRect(w, &r);
+    t.clientW = r.right - r.left; t.clientH = r.bottom - r.top;
+    return swapchain_caller::refuse(t);
+}
+
+// Whether a swap chain creation is the game's. Straight from the game or ReShade: as before, nothing walked or logged.
+// From another module: walk the return chain (swapchain_caller::decide) and check the window; the log names the module.
+static bool takeAsGame(void* ret, IUnknown* device, HWND w, bool* viaWrapper) {
+    if (calledByGame(ret)) return true;
+    HMODULE first = nullptr;
+    if (moduleOf(ret, &first) != swapchain_caller::Mod::kOther) return false;  // ours, Streamline, the system: as before
+    swapchain_caller::Mod chain[16];
+    const int n = callerChain(ret, chain, 16);
+    const swapchain_caller::Verdict v = swapchain_caller::decide(chain, n);
+    const char* why = v.kind != swapchain_caller::Verdict::kWrapper ? v.reason : wrapperRefusal(device, w);
+    wchar_t fn[MAX_PATH] = L"?";
+    if (!first || !GetModuleFileNameW(first, fn, MAX_PATH)) wcscpy_s(fn, L"?");
+    const wchar_t* name = wcsrchr(fn, L'\\') ? wcsrchr(fn, L'\\') + 1 : fn;
+    if (why) {
+        static std::atomic<int> logged;
+        if (logged.fetch_add(1) < 8) logf("dxgi: swap chain via %ls not taken (%s), passed through", name, why);
+        return false;
+    }
+    static std::atomic<bool> named;
+    if (!named.exchange(true)) logf("dxgi: the game's swap chain was passed on by %ls", name);
+    *viaWrapper = true;
+    return true;
 }
 
 // Called from Present: once the D3D12 device is lost, log why (and DRED's last operations / page fault, if enabled).
