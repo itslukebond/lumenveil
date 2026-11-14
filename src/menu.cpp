@@ -59,6 +59,7 @@ std::atomic<bool> g_open;  // read by the game's input hooks on their own thread
 // opened it this frame; g_padBusy: last frame a list was open or a slider was being adjusted (B backs out instead of
 // closing); g_padRelease: the menu closed, release the controller keys next frame.
 pad::PadSlots g_pad;
+pad::EmptySlots g_emptySlots;  // empty controller slots answered from the cache (the hook) and their counts (logged once)
 pad::PadView g_padView;
 bool g_padUsed, g_padOpened, g_padBusy, g_padRelease;
 static_assert(pad::kUp == XINPUT_GAMEPAD_DPAD_UP && pad::kDown == XINPUT_GAMEPAD_DPAD_DOWN && pad::kLeft == XINPUT_GAMEPAD_DPAD_LEFT &&
@@ -177,13 +178,17 @@ HRESULT STDMETHODCALLTYPE hk_GetDeviceStateA(IDirectInputDevice8W* d, DWORD cb, 
 HRESULT STDMETHODCALLTYPE hk_GetDeviceDataW(IDirectInputDevice8W* d, DWORD cb, LPDIDEVICEOBJECTDATA o, LPDWORD n, DWORD f) { return getData(0, d, cb, o, n, f); }
 HRESULT STDMETHODCALLTYPE hk_GetDeviceDataA(IDirectInputDevice8W* d, DWORD cb, LPDIDEVICEOBJECTDATA o, LPDWORD n, DWORD f) { return getData(1, d, cb, o, n, f); }
 // The game's controller read: published for the menu without a lock (this is the game's input thread), then blanked
-// while the menu is open; while it is closed, a button held when the menu closed stays hidden until released.
+// while the menu is open; while it is closed, a button held when the menu closed stays hidden until released. A slot
+// that answered "not connected" is answered from the cache until its re-ask time, as Microsoft recommends.
 DWORD WINAPI hk_XInputGetState(DWORD i, XINPUT_STATE* s) {
-    DWORD r = o_XInputGetState(i, s);
+    const ULONGLONG t = GetTickCount64();
+    DWORD r;
+    if (s && g_emptySlots.skip(i, t)) { *s = {}; r = ERROR_DEVICE_NOT_CONNECTED; }  // asked recently: still empty
+    else { r = o_XInputGetState(i, s); g_emptySlots.answer(i, r == ERROR_DEVICE_NOT_CONNECTED, t); }
     g_xiTid = GetCurrentThreadId();
     if (s) {
         const bool ok = r == ERROR_SUCCESS;
-        g_pad.record(i, ok, ok ? s->Gamepad.wButtons : 0, ok ? s->Gamepad.sThumbLX : 0, ok ? s->Gamepad.sThumbLY : 0, GetTickCount64());
+        g_pad.record(i, ok, ok ? s->Gamepad.wButtons : 0, ok ? s->Gamepad.sThumbLX : 0, ok ? s->Gamepad.sThumbLY : 0, t);
         if (ok && g_open) s->Gamepad = {};
         else if (ok) s->Gamepad.wButtons = g_pad.hide(i, s->Gamepad.wButtons);
     }
@@ -837,6 +842,12 @@ void pollToggle() {
     const bool ins = focused && (GetAsyncKeyState(VK_INSERT) & 0x8000) != 0, esc = focused && (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0;
     const ULONGLONG tick = GetTickCount64();
     g_padView = g_pad.merge(tick);
+    if (g_emptySlots.logDue(tick)) {
+        const auto& e = g_emptySlots;
+        logf("menu: controller slots in 30 s: XInput asked %u/%u/%u/%u, answered empty by the mod %u/%u/%u/%u",
+             e.asked[0].load(), e.asked[1].load(), e.asked[2].load(), e.asked[3].load(),
+             e.cached[0].load(), e.cached[1].load(), e.cached[2].load(), e.cached[3].load());
+    }
     const bool stickCombo = combo.update(focused && g_padView.comboDown, tick);  // both sticks held in for half a second
     const bool bClose = g_open && !g_padBusy && (g_padView.edges & pad::kB);
     if ((ins && !insDown) || (esc && !escDown && g_open) || stickCombo || bClose) {

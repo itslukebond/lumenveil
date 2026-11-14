@@ -260,7 +260,51 @@ static void navigation() {
     ImGui::DestroyContext();
 }
 
+// Empty controller slots: an answer of "not connected" is reused until the slot's re-ask time (slot 0 1 s, slot 1 2 s,
+// slot 2 3 s, slot 3 4 s, from the read that got it); a connected slot is always asked; the counts are logged once,
+// 30 s after the first read. Numbers are the spec's, written out here.
+static void emptySlots() {
+    const uint64_t wait[4] = { 1000, 2000, 3000, 4000 };
+    for (unsigned i = 0; i < 4; ++i) {
+        const uint64_t w = wait[i];
+        EmptySlots e;
+        CHECK(!e.skip(i, 5000));                      // never answered: the first read asks
+        e.answer(i, true, 10000);                     // empty
+        CHECK(e.skip(i, 10000));
+        CHECK(e.skip(i, 10000 + w - 1));              // still inside the window: answered by the mod
+        CHECK(!e.skip(i, 10000 + w));                 // re-ask time: asked
+        const uint64_t t = 10000 + w;
+        e.answer(i, true, t);                         // still empty: a new window from that read
+        CHECK(e.skip(i, t + 1)); CHECK(e.skip(i, t + w - 1)); CHECK(!e.skip(i, t + w));
+        const uint64_t u = t + w;
+        e.answer(i, false, u);                        // a pad answered: asked on every read from now on
+        CHECK(!e.skip(i, u)); CHECK(!e.skip(i, u + 1)); CHECK(!e.skip(i, u + 100000));
+        e.answer(i, true, u + 200000);                // it went away (a real read saw it): cached again
+        CHECK(e.skip(i, u + 200001));
+        e.answer(i, false, u + 200002);               // another thread's read finds a pad inside the window: asked again
+        CHECK(!e.skip(i, u + 200003));
+        for (unsigned j = 0; j < 4; ++j)              // slots are independent
+            if (j != i) CHECK(!e.skip(j, 10001));
+    }
+    EmptySlots o;                                     // slot numbers above 3: always asked, never counted
+    o.answer(4, true, 1000); o.answer(0xFFFFFFFFu, true, 1000);
+    CHECK(!o.skip(4, 1001)); CHECK(!o.skip(0xFFFFFFFFu, 1001));
+    for (unsigned j = 0; j < 4; ++j) CHECK(o.asked[j].load() == 0 && o.cached[j].load() == 0);
+
+    EmptySlots c;                                     // counts: 2 asks and 5 answers from the mod on slot 2
+    CHECK(!c.logDue(1000000));                        // no read yet: nothing to log
+    CHECK(!c.skip(2, 1000)); c.answer(2, true, 1000);
+    for (uint64_t k = 0; k < 5; ++k) CHECK(c.skip(2, 1100 + k));
+    CHECK(!c.skip(2, 4000)); c.answer(2, true, 4000);
+    CHECK(c.asked[2].load() == 2 && c.cached[2].load() == 5);
+    for (unsigned j : { 0u, 1u, 3u }) CHECK(c.asked[j].load() == 0 && c.cached[j].load() == 0);
+    CHECK(!c.logDue(1000 + 29999));                   // the first read was at 1000
+    CHECK(c.logDue(1000 + 30000));                    // 30 s later: once
+    CHECK(!c.logDue(1000 + 30001)); CHECK(!c.logDue(1000 + 900000));
+}
+
 int main() {
+    emptySlots();
     comboHold();
     slots();
     latch();

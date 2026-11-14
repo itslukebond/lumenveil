@@ -2,7 +2,9 @@
 # Checks the Insert menu's controller support: builds tests/menu_pad_test.cpp (src/menu_pad.h with Dear ImGui's core)
 # with the host compiler and runs it, then checks menu.cpp's structure: the controller hook blanks the pad while the
 # menu is open and hides latched buttons while it is closed, takes no lock, every close goes through closeMenu, which
-# latches before it clears g_open, and the menu never sees X or Y. Each source check must fail on a broken copy.
+# latches before it clears g_open, the menu never sees X or Y, and an empty slot is answered from the cache (XInput
+# asked only on the other path, with XInput's own empty answer) with its counts logged from pollToggle. Each source
+# check must fail on a broken copy.
 # Usage: tests/check_menu_pad.sh [source folder holding menu_pad.h and menu.cpp] [Dear ImGui folder]
 #        (defaults: src next to tests; third_party/imgui next to tests, or $IMGUI)
 here=$(cd "$(dirname "$0")" && pwd)
@@ -41,6 +43,14 @@ def problems(src, hdr):
     if not re.search(r'if \(ok && g_open\) s->Gamepad = \{\};', h): out.append('the controller hook no longer blanks the pad while the menu is open')
     if not re.search(r'else if \(ok\) s->Gamepad\.wButtons = g_pad\.hide\(', h): out.append('the controller hook does not hide latched buttons while the menu is closed')
     if re.search(r'lock_guard|unique_lock|mutex|logf\(|new |malloc', h): out.append('the controller hook waits, logs or allocates')
+    # an empty slot answered from the cache: only with a state pointer, as XInput answers it (zeroed state, not
+    # connected); XInput is asked only on the other path, and only its "not connected" answer starts a window
+    if not re.search(r'if \(s && g_emptySlots\.skip\(i, t\)\) \{ \*s = \{\}; r = ERROR_DEVICE_NOT_CONNECTED; \}', h):
+        out.append('the controller hook does not answer a cached empty slot as XInput does')
+    if not re.search(r'\n\s*else \{ r = o_XInputGetState\(i, s\); g_emptySlots\.answer\(i, r == ERROR_DEVICE_NOT_CONNECTED, t\); \}', h) or \
+       h.count('o_XInputGetState(') != 1:
+        out.append('the controller hook asks XInput outside the uncached path, or caches more than "not connected"')
+    if 'logDue(' in h or 'g_emptySlots.logDue(tick)' not in code(poll): out.append('the empty slot counts are not logged from pollToggle')
     # every close goes through closeMenu, which latches before it clears g_open
     c = code(close)
     i, j = c.find('g_pad.latchAll();'), c.find('g_open = false;')
@@ -82,6 +92,12 @@ broken = {
     'g_open plain bool': (source.replace('std::atomic<bool> g_open', 'bool g_open', 1), header),
     'B never closes': (source.replace(' || bClose) {', ') {', 1), header),
     'B closes while busy': (source.replace('bClose = g_open && !g_padBusy && ', 'bClose = g_open && ', 1), header),
+    'XInput asked before the cache': (source.replace(hk, hk.replace('    DWORD r;\n', '    DWORD r = o_XInputGetState(i, s);\n', 1), 1), header),
+    'cached answer is success': (source.replace('*s = {}; r = ERROR_DEVICE_NOT_CONNECTED;', '*s = {}; r = ERROR_SUCCESS;', 1), header),
+    'cached state not zeroed': (source.replace('{ *s = {}; r = ERROR_DEVICE_NOT_CONNECTED; }', '{ r = ERROR_DEVICE_NOT_CONNECTED; }', 1), header),
+    'other errors cached': (source.replace('g_emptySlots.answer(i, r == ERROR_DEVICE_NOT_CONNECTED, t)', 'g_emptySlots.answer(i, r != ERROR_SUCCESS, t)', 1), header),
+    'cache without a state': (source.replace('if (s && g_emptySlots.skip(', 'if (g_emptySlots.skip(', 1), header),
+    'counts not logged': (source.replace('if (g_emptySlots.logDue(tick))', 'if (false)', 1), header),
     'no frame after close': (source.replace('(g_counter || g_open || g_padRelease) && compose(', '(g_counter || g_open) && compose(', 1), header),
 }
 for name, (s, h) in broken.items():

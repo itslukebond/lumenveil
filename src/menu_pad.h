@@ -76,6 +76,43 @@ struct PadSlots {
     }
 };
 
+// How long a slot that answered "not connected" is answered from the cache before XInput is asked again. Slot 0 is
+// where the first controller goes, so it is re-asked soonest.
+constexpr uint64_t kSlotRecheckMs[4] = { 1000, 2000, 3000, 4000 };
+
+// Controller slots with nothing in them. Asking XInput about an empty slot is slow, so after it answers "not connected"
+// the game gets that answer from us until the slot's re-ask time; a connected slot is asked on every read, so a
+// disconnect shows at once. Called from the game's controller reads on any thread, without a lock. The counts feed one
+// log line, 30 s after the first read.
+struct EmptySlots {
+    std::atomic<uint64_t> until[4] = {};  // re-ask time per slot; 0: ask
+    std::atomic<uint32_t> asked[4] = {}, cached[4] = {};
+    std::atomic<uint64_t> first{ 0 };     // tick of the first read; 0: none yet
+    std::atomic<bool> logged{ false };
+    static_assert(std::atomic<uint32_t>::is_always_lock_free && std::atomic<bool>::is_always_lock_free,
+                  "the game's controller reads must never wait");
+
+    // True when slot i is answered "not connected" from the cache for this read.
+    bool skip(unsigned i, uint64_t now) {
+        uint64_t none = 0;
+        first.compare_exchange_strong(none, now);
+        if (i >= 4 || now >= until[i].load()) return false;
+        cached[i].fetch_add(1);
+        return true;
+    }
+    // XInput's answer for slot i: empty starts a new window from this read; connected clears it.
+    void answer(unsigned i, bool empty, uint64_t now) {
+        if (i >= 4) return;
+        until[i].store(empty ? now + kSlotRecheckMs[i] : 0);
+        asked[i].fetch_add(1);
+    }
+    // True exactly once: on the first call at least 30 s after the first read.
+    bool logDue(uint64_t now) {
+        const uint64_t f = first.load();
+        return f && now >= f + 30000 && !logged.exchange(true);
+    }
+};
+
 // Both sticks held in: true once when the hold reaches kHoldMs; again only after a release. Present thread only.
 struct ComboHold {
     uint64_t since = 0;

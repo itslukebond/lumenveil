@@ -80,6 +80,17 @@ Browse local files.
 
    In Steam: right click the game, Properties, General, Launch Options, paste. If you already have launch
    options, put WINEDLLOVERRIDES="dxgi=n,b" in front of them and keep one %command%.
+
+   If you start the game through Flagrum, Steam's launch option for it begins with eval. Put
+   WINEDLLOVERRIDES="dxgi=n,b" straight after eval rather than in front of it, or the game Flagrum starts may not
+   load the mod:
+
+   ```
+   eval WINEDLLOVERRIDES="dxgi=n,b" $(echo "%command%" | sed -r "s/proton waitforexitandrun .*/proton waitforexitandrun/") "'<path to Flagrum.exe>'" --launch
+   ```
+
+   Replace `<path to Flagrum.exe>` with the path from Flagrum's guide, Running Flagrum on Linux, on its GitHub wiki.
+   Keep both sets of quotes around it, so a path with spaces in it still works.
 4. Start the game and press Insert for the mod's menu.
 
 ## What the scripts change
