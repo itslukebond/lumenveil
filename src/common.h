@@ -1,12 +1,14 @@
 #pragma once
 #include <d3d11.h>
 #include <dxgi1_2.h>
+#include <d3dcompiler.h>
 #include <string>
 #include <vector>
 
 void logf(const char* fmt, ...);
 void flushLog();
 std::wstring path(const wchar_t* name);  // file in the game folder
+pD3DCompile shaderCompiler();  // D3DCompile from the game folder's d3dcompiler_47.dll, else System32's; null if neither
 
 // cbTemporalAA (TAA resolve ps f5990d1d5712e767, cb0)
 struct TaaCB {

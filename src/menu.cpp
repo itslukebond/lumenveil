@@ -243,8 +243,9 @@ bool createPso(DXGI_FORMAT fmt) {
     if (g_pso && g_psoFmt == fmt) return true;
     release(g_pso);
     ID3DBlob *vs = nullptr, *ps = nullptr, *err = nullptr;
-    HRESULT hr = D3DCompile(kHlsl, sizeof kHlsl - 1, "menu", nullptr, nullptr, "vs", "vs_5_0", 0, 0, &vs, &err);
-    if (SUCCEEDED(hr)) hr = D3DCompile(kHlsl, sizeof kHlsl - 1, "menu", nullptr, nullptr, "ps", "ps_5_0", 0, 0, &ps, &err);
+    const pD3DCompile compile = shaderCompiler();
+    HRESULT hr = compile ? compile(kHlsl, sizeof kHlsl - 1, "menu", nullptr, nullptr, "vs", "vs_5_0", 0, 0, &vs, &err) : E_FAIL;
+    if (SUCCEEDED(hr)) hr = compile(kHlsl, sizeof kHlsl - 1, "menu", nullptr, nullptr, "ps", "ps_5_0", 0, 0, &ps, &err);
     if (SUCCEEDED(hr) && !g_rs) {
         D3D12_DESCRIPTOR_RANGE range = { D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0, 0, 0 };
         D3D12_ROOT_PARAMETER rp[2] = {};

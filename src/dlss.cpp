@@ -172,8 +172,7 @@ bool init(ID3D11DeviceContext* ctx) {
     dev1->Release();
     if (FAILED(hr)) { logf("dlss: CreateDeviceContextState %08x", hr); return false; }
 
-    wchar_t sys[MAX_PATH]; GetSystemDirectoryW(sys, MAX_PATH); wcscat_s(sys, L"\\d3dcompiler_47.dll");
-    auto compile = (pD3DCompile)GetProcAddress(LoadLibraryW(sys), "D3DCompile");
+    const pD3DCompile compile = shaderCompiler();
     auto makeCS = [&](const char* src, const char* name, ID3D11ComputeShader** cs) {
         ID3DBlob *code = nullptr, *err = nullptr;
         HRESULT h = compile ? compile(src, strlen(src), name, nullptr, nullptr, "main", "cs_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &code, &err) : E_FAIL;

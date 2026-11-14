@@ -42,6 +42,26 @@ void flushLog() { std::lock_guard<std::mutex> lk(g_logMx); if (g_log) fflush(g_l
 
 std::wstring path(const wchar_t* name) { return std::wstring(g_dir) + name; }
 
+// Every copy of the game ships Microsoft's d3dcompiler_47.dll in its folder, and loading it by its full path gets that
+// copy under Proton too. Proton's own d3dcompiler_47 (vkd3d-shader before 2.0, as on the Steam Deck) cannot build some
+// of the mod's shaders ("GetDimensions is not defined on type RWTexture2D<float3>"). System32's copy is the fallback.
+pD3DCompile shaderCompiler() {
+    static const pD3DCompile fn = [] {
+        auto load = [](const std::wstring& file) {
+            HMODULE m = LoadLibraryW(file.c_str());
+            auto f = m ? (pD3DCompile)GetProcAddress(m, "D3DCompile") : nullptr;
+            if (f) logf("shaders: compiler %ls", file.c_str());
+            else logf("shaders: compiler %ls %s", file.c_str(), m ? "has no D3DCompile" : "not loaded");
+            return f;
+        };
+        if (auto f = load(path(L"d3dcompiler_47.dll"))) return f;
+        wchar_t sys[MAX_PATH];
+        const UINT n = GetSystemDirectoryW(sys, MAX_PATH);
+        return n && n < MAX_PATH ? load(std::wstring(sys, n) + L"\\d3dcompiler_47.dll") : nullptr;
+    }();
+    return fn;
+}
+
 // ---- shader registry -------------------------------------------------------
 static const unsigned long long kTaaPS = 0xf5990d1d5712e767ull;
 static void* g_taaPS;
@@ -204,8 +224,7 @@ static void makeHudPS(ID3D11Device* d, HRESULT(STDMETHODCALLTYPE* create)(ID3D11
                       void* game, unsigned long long h) {
     for (int i = 0; i < 3; ++i) {
         if (h != kHudPS[i] || g_hudOurs[i]) continue;
-        wchar_t sys[MAX_PATH]; GetSystemDirectoryW(sys, MAX_PATH); wcscat_s(sys, L"\\d3dcompiler_47.dll");
-        auto compile = (pD3DCompile)GetProcAddress(LoadLibraryW(sys), "D3DCompile");
+        const pD3DCompile compile = shaderCompiler();
         const std::string src = std::string(kCubicHlsl) + kHudHlsl[i];
         ID3DBlob *code = nullptr, *err = nullptr;
         HRESULT hr = compile ? compile(src.c_str(), src.size(), "ffxv_hud", nullptr, nullptr, "main", "ps_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &code, &err) : E_FAIL;
@@ -222,8 +241,7 @@ static void makeFontPS(ID3D11Device* d, HRESULT(STDMETHODCALLTYPE* create)(ID3D1
     if (h == kFontPS[0]) { g_fontGame[0] = game; return; }  // the soft drop shadow (f23a): left as the game draws it
     for (int i = 1; i < 2; ++i) {
         if (h != kFontPS[i] || g_fontOurs[i]) continue;
-        wchar_t sys[MAX_PATH]; GetSystemDirectoryW(sys, MAX_PATH); wcscat_s(sys, L"\\d3dcompiler_47.dll");
-        auto compile = (pD3DCompile)GetProcAddress(LoadLibraryW(sys), "D3DCompile");
+        const pD3DCompile compile = shaderCompiler();
         ID3DBlob *code = nullptr, *err = nullptr;
         HRESULT hr = compile ? compile(kFontHlsl[i], strlen(kFontHlsl[i]), "ffxv_font", nullptr, nullptr, "main", "ps_5_0",
                                        D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &code, &err) : E_FAIL;
