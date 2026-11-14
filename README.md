@@ -190,7 +190,8 @@ stick to move, A to change a setting and B to close a list or the menu. On a Ste
 </p>
 
 The scaling mode is written to `RenderingResolutionRatio` in the game's
-`Documents\My Games\FINAL FANTASY XV\Steam\<id>\savestorage\GraphicsConfig.ini`.
+`%USERPROFILE%\Documents\My Games\FINAL FANTASY XV\Steam\<id>\savestorage\GraphicsConfig.ini`. That's the Documents
+folder in your user folder, which the game uses even if Windows keeps your Documents in OneDrive.
 
 ---
 

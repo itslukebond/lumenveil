@@ -7,6 +7,7 @@
 #include "fg_select.h"
 #include "menu_buttons.h"
 #include "menu_pad.h"
+#include "game_config.h"
 #include "xess_rules.h"
 #include "antilag_rules.h"
 #include <d3d12.h>
@@ -89,13 +90,11 @@ template <class T> void release(T*& p) { if (p) { p->Release(); p = nullptr; } }
 int iniGet(const wchar_t* sec, const wchar_t* key, int def) { return GetPrivateProfileIntW(sec, key, def, path(L"ffxv_dlss.ini").c_str()); }
 void iniSet(const wchar_t* sec, const wchar_t* key, int v) { WritePrivateProfileStringW(sec, key, std::to_wstring(v).c_str(), path(L"ffxv_dlss.ini").c_str()); }
 
-// The game's settings: Documents\My Games\FINAL FANTASY XV\Steam\<steam id>\savestorage\GraphicsConfig.ini (newest if
-// several accounts have one), or "" if none.
+// The game's settings: %USERPROFILE%\Documents\My Games\FINAL FANTASY XV\Steam\<steam id>\savestorage\GraphicsConfig.ini
+// (newest if several accounts have one), or "" if none. game_config.h says why USERPROFILE.
 std::wstring gameConfig() {
-    PWSTR docs = nullptr;
-    if (FAILED(SHGetKnownFolderPath(FOLDERID_Documents, 0, nullptr, &docs))) return {};
-    const std::wstring base = std::wstring(docs) + L"\\My Games\\FINAL FANTASY XV\\Steam\\";
-    CoTaskMemFree(docs);
+    const std::wstring base = gameSettingsRoot(envValue([](wchar_t* b, DWORD n) { return GetEnvironmentVariableW(L"USERPROFILE", b, n); }));
+    if (base.empty()) { logf("menu: game config not found (no USERPROFILE)"); return {}; }
     std::wstring best; FILETIME bestT = {};
     WIN32_FIND_DATAW fd;
     HANDLE h = FindFirstFileW((base + L"*").c_str(), &fd);

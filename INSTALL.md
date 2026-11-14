@@ -185,7 +185,9 @@ Use this if a script does not work for you. The game folder is the folder that h
 
 5. Raise the game's frame rate limit: open GraphicsConfig.ini in a text editor and change the MaxFramerate line
    to MaxFramerate=240. The file is in:
-   - Windows: Documents\My Games\FINAL FANTASY XV\Steam\<number>\savestorage\GraphicsConfig.ini
+   - Windows: paste %USERPROFILE%\Documents\My Games\FINAL FANTASY XV\Steam into the File Explorer address
+     bar, then open the numbered folder inside it and its savestorage folder. That's the Documents folder in your
+     user folder, which the game uses even if Windows keeps your Documents in OneDrive.
    - Linux: <Steam library>/steamapps/compatdata/637650/pfx/drive_c/users/steamuser/Documents/My Games/FINAL FANTASY XV/Steam/<number>/savestorage/GraphicsConfig.ini
 
    The game creates the file the first time you change a graphics option.

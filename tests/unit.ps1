@@ -182,5 +182,19 @@ if ($Case -eq 'signer') {
     Check 'signer on Windows, labels wrong: Windows not asked' ((Test-VendorDll (Join-Path $Fixtures 'nover.dll') 'nvngx_dlss.dll').Why -ceq 'it has no version information' -and $script:asked -eq 0)
     if ($failed) { exit 1 } else { exit 0 }
 }
+# docs: the settings files are the ones under USERPROFILE\Documents, where the game keeps them, even when the
+# Documents folder Windows reports is elsewhere (OneDrive) and holds an older copy. The caller sets USERPROFILE and
+# points the reported Documents folder (HOME/Documents off Windows) at the other tree.
+if ($Case -eq 'docs') {
+    . $Script -Action install
+    $rel = @('Documents', 'My Games', 'FINAL FANTASY XV', 'Steam', '111', 'savestorage')
+    $game = [System.IO.Path]::GetFullPath((Join-Parts $env:USERPROFILE ($rel + 'GraphicsConfig.ini')))
+    $gameB = $game + $Keep
+    foreach ($s in @(@('', $game), @($Keep, $gameB))) {
+        $got = @(Get-SettingsFiles $s[0] | ForEach-Object { [System.IO.Path]::GetFullPath($_) })
+        Check ("GraphicsConfig.ini{0}: exactly the one under USERPROFILE\Documents (got {1}: {2})" -f $s[0], $got.Count, ($got -join ' | ')) ($got.Count -eq 1 -and $got[0] -ceq $s[1])
+    }
+    if ($failed) { exit 1 } else { exit 0 }
+}
 Write-Output "unknown case $Case"
 exit 1

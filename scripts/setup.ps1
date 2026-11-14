@@ -158,7 +158,9 @@ function Get-DownloadsDir {
 }
 function Get-DocumentsDir {
     if ($DocumentsDir) { return $DocumentsDir }
-    return [Environment]::GetFolderPath('MyDocuments')
+    # The game keeps its settings under USERPROFILE\Documents even when Windows has moved Documents (OneDrive)
+    if ($env:USERPROFILE) { return (Join-Path $env:USERPROFILE 'Documents') }
+    return $null
 }
 function Get-Libraries {
     $all = @()
@@ -1490,7 +1492,10 @@ function Set-FpsLimit {
     if ($files.Count -eq 0) {
         Write-Note "Skipped: the game's settings file was not found. Start the game once, change any graphics"
         Write-Note 'option, then run this again, or set MaxFramerate=240 by hand in'
-        Write-Note 'Documents\My Games\FINAL FANTASY XV\Steam\<number>\savestorage\GraphicsConfig.ini'
+        Write-Note 'GraphicsConfig.ini. To find it, paste this into the File Explorer address bar:'
+        Write-Note '%USERPROFILE%\Documents\My Games\FINAL FANTASY XV\Steam'
+        Write-Note 'then open the numbered folder inside it and its savestorage folder. The game uses this folder'
+        Write-Note 'even if Windows keeps your Documents in OneDrive.'
         return 'skipped'
     }
     $status = 'already done'
