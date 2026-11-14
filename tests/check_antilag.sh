@@ -51,7 +51,7 @@ def problems(p, m):
     if not order(present_, 'menuFrame(', 'al2Run('): out.append('p12Present decides Anti-Lag 2 before the menu has run')
     if not re.search(r'al2Run\(g_al2State, g_set\.antilag, g_fg, g_xessSc\)', present_):
         out.append('p12Present does not rule out DLSS and XeSS frame generation for Anti-Lag 2')
-    if not order(present_, 'MarkEndOfFrameRendering(&g_al2)', 'g_sc->Present(si'): out.append('the end of the frame is not marked before Present')
+    if not order(present_, 'MarkEndOfFrameRendering(&g_al2)', 'g_sc->Present(interval,'): out.append('the end of the frame is not marked before Present')
     if not re.search(r'if \(g_fsrFg && al2\) AMD::AntiLag2DX12::MarkEndOfFrameRendering', present_):
         out.append('the end of the frame is marked without FSR frame generation and Anti-Lag 2 both on')
     if not order(present_, 'fsrPace()', 'Update(&g_al2'): out.append('Anti-Lag 2 is updated before the presenter paces the frame')

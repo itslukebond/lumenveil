@@ -143,7 +143,7 @@ struct FgSettings { int enable, frames, target, limit, reflex, antilag; };
 // backend: the one frame generation backend chosen at launch by [fg] backend (fg_select.h): -1 none, 0 DLSS-G
 // (Streamline), 1 FSR, 2 XeSS; formatRefused: XeSS-FG was chosen but the game's back buffer is 16-bit float (scRGB)
 // antilag: AMD Radeon Anti-Lag 2's Al2State (antilag_rules.h); antilagOn: it ran on the last frame
-struct FgStatus { bool available, generating, dynamicSupported; unsigned maxGenerated; int autoCap; int backend; bool formatRefused; int antilag; bool antilagOn; };
+struct FgStatus { bool available, generating, dynamicSupported; unsigned maxGenerated; int autoCap; int backend; bool formatRefused; int antilag; bool antilagOn; bool vsyncPaced; };
 FgSettings fgSettings();
 void fgApply(const FgSettings& s);
 FgStatus fgStatus();

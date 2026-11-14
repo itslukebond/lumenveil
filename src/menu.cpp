@@ -704,9 +704,9 @@ void drawMenu() {
     }
     {
         AccentScope accent(kNeutral);  // the mod's own frame cap, whichever backend runs
-        // it applies through Reflex when Streamline runs, else through the presenter's own pacing (FSR or XeSS), so it
-        // stays usable without FG
-        ImGui::BeginDisabled(!st.available && st.backend < 0 && di.active != 1 && di.active != 2);
+        // it applies through Reflex when Streamline runs, else through the presenter's own pacing (FSR or XeSS, or the
+        // game's VSync on Windows), so it stays usable without FG
+        ImGui::BeginDisabled(!st.available && st.backend < 0 && di.active != 1 && di.active != 2 && !st.vsyncPaced);
         char autoName[32]; snprintf(autoName, sizeof autoName, "Auto (%s)", syncName());
         const char* capModes[] = { "Off", autoName, "Custom" };
         int capMode = fs.limit < 0 ? 1 : fs.limit == 0 ? 0 : 2;

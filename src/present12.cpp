@@ -12,12 +12,14 @@
 #include "xess_rules.h"
 #include "antilag_rules.h"
 #include "colour_space.h"
+#include "vsync_rules.h"
 #include <d3d11_4.h>
 #include <d3d12.h>
 #include <dxgi1_6.h>
 #include <psapi.h>
 #include <MinHook.h>
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <sl.h>
 #include <sl_dlss_g.h>
@@ -338,13 +340,26 @@ int autoCap() {
     return hz - hz * hz / 3600;
 }
 int g_autoCap;
+bool g_wantSync, g_syncKnown;  // the frame cap stands in for the game's VSync (Windows, our own Present); vsync_rules.h
+bool g_watchdog;               // the stall watchdog thread has been started
+
+// Where the render thread is, for the stall watchdog: set before each step of our present path that can wait.
+enum { kStageGame, kStageCopy, kStageFg, kStageMenu, kStagePresent, kStageAfter, kStagePace, kStageAntiLag, kStageResize,
+       kStageFit };
+const char* const kStageNames[] = { "the game's own code", "the frame copy", "frame generation", "the menu",
+                                    "our Present", "the work after our Present", "the frame cap", "Anti-Lag 2",
+                                    "the resize (frame generation off, targets released, the game's ResizeBuffers)",
+                                    "our swap chain resize" };
+std::atomic<int> g_stage;
+std::atomic<unsigned> g_presents;
+std::atomic<DWORD> g_renderTid;
 
 void setReflex() {
     static const sl::ReflexMode modes[] = { sl::ReflexMode::eOff, sl::ReflexMode::eLowLatency, sl::ReflexMode::eLowLatencyWithBoost };
     sl::ReflexOptions ro;
     ro.mode = modes[std::clamp(reflexEffective(), 0, 2)];
     g_autoCap = autoCap();  // cached: the counter reads fgStatus every frame
-    const int cap = g_set.limit < 0 ? g_autoCap : g_set.limit;
+    const int cap = vsyncCap(g_set.limit, g_autoCap, g_wantSync);
     ro.frameLimitUs = cap > 0 ? 1000000u / cap : 0;  // Reflex frame limiter, the limiter dynamic MFG is designed around
     slReflexSetOptions(ro);
 }
@@ -533,12 +548,15 @@ PFN_SetHDRMetaData o_SetHDRMetaData;
 
 HRESULT STDMETHODCALLTYPE hk_ResizeBuffers(IDXGISwapChain* sc, UINT n, UINT w, UINT h, DXGI_FORMAT f, UINT fl) {
     if (sc != g_game) return o_ResizeBuffers(sc, n, w, h, f, fl);
+    g_stage = kStageResize;
     if (!w || !h) { RECT r; GetClientRect(g_wnd, &r); w = r.right; h = r.bottom; }  // the hidden window's size means nothing
     if (g_fgOn) fgSetMode(false);  // Streamline: FG off across resizes
     g_validRun = 0;  // new targets: under Wine, FG waits for a fresh settled second
     releaseTargets();
     HRESULT hr = o_ResizeBuffers(sc, n, w, h, f, fl);
+    g_stage = kStageFit;
     HRESULT hr12 = SUCCEEDED(hr) ? fitSwapchain(w, h, f) : E_ABORT;
+    g_stage = kStageGame;
     logf("d3d12: ResizeBuffers %ux%u fmt %u: game %08x ours %08x", w, h, f, hr, hr12);
     if (!g_sc) { fail("swapchain replacement", hr12); g_game = nullptr; return hr; }  // the game's frames stay on its hidden window
     if (FAILED(hr12) || !createTargets()) logf("d3d12: resize failed, frames will not reach the screen");
@@ -638,7 +656,7 @@ void fsrPace() {
     static LARGE_INTEGER next;
     if (prev && g_fence->GetCompletedValue() < prev) { g_fence->SetEventOnCompletion(prev, ev); WaitForSingleObject(ev, 100); }
     prev = g_copyDone;
-    const int cap = g_set.limit < 0 ? g_autoCap : g_set.limit;
+    const int cap = vsyncCap(g_set.limit, g_autoCap, g_wantSync);
     LARGE_INTEGER now; QueryPerformanceCounter(&now);
     if (cap <= 0) { next = now; return; }
     const LONGLONG period = g_qpf.QuadPart * (g_fsrGen || g_xessGen ? 2 : 1) / cap;
@@ -672,6 +690,7 @@ ID3D12Resource* p12Open(int i, ID3D11Texture2D* t, UINT w) {
 FgSettings fgSettings() { return g_set; }
 FgStatus fgStatus() {
     FgStatus s = g_status;
+    s.vsyncPaced = g_wantSync;
     s.available = g_fg || proxyFg(); s.generating = proxyFg() ? g_fsrGen || g_xessGen : g_fgOn; s.autoCap = g_autoCap;
     s.backend = g_xessSc ? 2 : g_fsrFg ? 1 : g_fg ? 0 : -1;
     s.formatRefused = g_xessRefused;
@@ -730,6 +749,29 @@ bool p12IsGame(IDXGISwapChain* sc) { return sc && sc == g_game; }
 HWND p12GameWindow() { return g_wnd; }
 
 extern PFN_D3D12_CREATE_DEVICE g_createDevice12;  // main.cpp
+
+// Logs once when no frame has reached our Present for 3 s, naming where the render thread is and whether the game's
+// window still answers messages, and once when frames resume. Runs for the life of the process.
+DWORD WINAPI stallWatchdog(void*) {
+    StallWatch w;
+    for (;;) {
+        Sleep(500);
+        const int r = w.step(g_presents.load(), GetTickCount64());
+        if (r == kStallBegan) {
+            const HWND wnd = g_wnd;
+            DWORD_PTR res = 0;
+            const bool answers = SendMessageTimeoutW(wnd, WM_NULL, 0, 0, SMTO_ABORTIFHUNG, 500, &res) != 0;
+            logf("d3d12: stall: no frame for 3 s, render thread %lu in %s; game window thread %lu %s%s%s; hidden window "
+                 "thread %lu", g_renderTid.load(), kStageNames[g_stage.load()], GetWindowThreadProcessId(wnd, nullptr),
+                 answers ? "answers" : "does not answer", IsHungAppWindow(wnd) ? ", marked not responding" : "",
+                 IsIconic(wnd) ? ", minimised" : "", GetWindowThreadProcessId(g_dummy, nullptr));
+            flushLog();
+        } else if (r == kStallEnded) {
+            logf("d3d12: stall over: frames resumed after %llu ms", w.stalledMs);
+            flushLog();
+        }
+    }
+}
 
 HWND p12Init(IUnknown* dev, IDXGIFactory2* f, PFN_CreateSCHwnd create, HWND wnd, const DXGI_SWAP_CHAIN_DESC1* desc) {
     if (g_d3d12) return reattach(wnd, desc);
@@ -852,6 +894,10 @@ HWND p12Init(IUnknown* dev, IDXGIFactory2* f, PFN_CreateSCHwnd create, HWND wnd,
     newDummy(wnd);
     DXGI_SWAP_CHAIN_DESC1 cur; g_sc->GetDesc1(&cur);
     if (menuInit(g_d3d12, g_d3d12Queue, wnd, cur.Height)) menuTargets(g_sc);
+    if (!g_watchdog) {
+        g_watchdog = true;
+        if (HANDLE th = CreateThread(nullptr, 0, stallWatchdog, nullptr, 0, nullptr)) CloseHandle(th);
+    }
     logf("d3d12: presenting via D3D12 swapchain %p on hwnd %p; game swapchain on hidden %p (flags %x)", (void*)g_sc, (void*)wnd, (void*)g_dummy, sd.Flags);
     flushLog();
     return g_dummy;
@@ -885,6 +931,8 @@ HRESULT p12Present(UINT si, UINT flags) {
     if (!g_qpf.QuadPart) QueryPerformanceFrequency(&g_qpf);
     LARGE_INTEGER t; QueryPerformanceCounter(&t);
     if (g_lastExit.QuadPart) { LARGE_INTEGER e = g_lastExit; g_tUs[6] += lapUs(e); }
+    g_renderTid = GetCurrentThreadId();
+    g_stage = kStageCopy;
     g_ctx11->Wait(g_fence11, g_copyDone);  // D3D12 has copied the previous frame out (never waits on its Present)
     g_ctx11->CopyResource(g_shared11, g_gameBB);
     g_ctx11->Signal(g_up11, ++g_upVal);
@@ -896,7 +944,8 @@ HRESULT p12Present(UINT si, UINT flags) {
     g_d3d12Queue->Signal(g_fence, g_copyDone = ++g_fenceVal);
     g_tUs[0] += lapUs(t);
     // FSR decides this frame's generation first: the menu routes the UI by it (layer while generating, else drawn in)
-    if (g_fsrFg) { fgBeforePresent(); g_tUs[2] += lapUs(t); }
+    if (g_fsrFg) { g_stage = kStageFg; fgBeforePresent(); g_tUs[2] += lapUs(t); }
+    g_stage = kStageMenu;
     menuFrame(g_sc, bb);  // counter + Insert menu, drawn over the copied frame
     g_tUs[1] += lapUs(t);
     // AMD Radeon Anti-Lag 2, decided after the menu so a change applies this frame. FSR's presenter thread reads it from
@@ -907,24 +956,45 @@ HRESULT p12Present(UINT si, UINT flags) {
         g_sc->SetPrivateData(kFfxAntiLag2Data, sizeof data, &data);
         g_al2DataSc = g_sc; g_al2DataOn = al2;
     }
+    // On Windows the game's VSync (interval 1 or more) is honoured by the frame cap, not by our Present: a Present that
+    // waits for the display can hold the render thread while the game's window thread waits on it, and the game freezes.
+    // Under Wine/Proton and on FSR's or XeSS's swap chain the game's interval stays (vsync_rules.h).
+    const UINT interval = vsyncInterval(si, g_wine, proxyFg());
+    if (g_wantSync != vsyncByCap(si, g_wine, proxyFg()) || !g_syncKnown) {
+        g_wantSync = vsyncByCap(si, g_wine, proxyFg());
+        g_syncKnown = true;
+        if (g_fg) setReflex();
+        if (g_wantSync) logf("d3d12: game asked for VSync: presenting at interval 0, paced to %d fps by %s",
+                             vsyncCap(g_set.limit, g_autoCap, true), g_fg ? "Reflex" : "our frame cap");
+        else logf("d3d12: game asked for VSync interval %u: presenting at interval %u%s", si, interval,
+                  si == 0 && g_tearing ? " with tearing allowed" : "");
+    }
+    g_stage = kStageFg;
     if (g_fg || g_xessSc) fgBeforePresent();  // XeSS: its markers and present id right before Present
     g_tUs[2] += lapUs(t);
     if (g_fsrFg && al2) AMD::AntiLag2DX12::MarkEndOfFrameRendering(&g_al2);  // before FSR generates from this frame
-    HRESULT hr = g_sc->Present(si, si == 0 && g_tearing ? flags | DXGI_PRESENT_ALLOW_TEARING : flags);  // blocks once 3 frames are queued, like D3D11's default latency
+    g_stage = kStagePresent;
+    HRESULT hr = g_sc->Present(interval, si == 0 && g_tearing ? flags | DXGI_PRESENT_ALLOW_TEARING : flags);  // blocks once 3 frames are queued, like D3D11's default latency
+    ++g_presents;
     g_tUs[3] += lapUs(t);
+    g_stage = kStageAfter;
     menuCount(g_fg ? fgAfterPresent() : g_xessSc ? xessFgAfterPresent(g_xeId++) : g_fsrGen ? 2 : 1);
     static unsigned presents;
     if (++presents % 240 == 0) refreshEncoding();  // NVAPI HDR can change after our swapchain exists
     const int up = g_fg ? -1 : dlssInfo().active;
-    if (proxyFg() || up == 1 || up == 2) fsrPace();  // FSR or XeSS in use and no Reflex (FG may be off at launch)
+    g_stage = kStagePace;
+    if (ownPace(g_fg, proxyFg(), up, g_wantSync)) fsrPace();  // FSR or XeSS in use, or the game's VSync, and no Reflex (FG may be off at launch)
+    g_stage = kStageAntiLag;
     if (al2 || g_al2.m_enabled) {  // AMD's driver holds the game's next frame here; off: one call turns it off, then none
         const bool was = g_al2.m_enabled;
         const HRESULT r = AMD::AntiLag2DX12::Update(&g_al2, al2, 0);  // 0: no cap of AMD's, the menu's cap stays in charge
         if (al2 != was) logf("antilag: %s", al2 ? "on" : "off");
         if (FAILED(r) && !g_al2Logged) { logf("antilag: update failed %08x", r); g_al2Logged = true; }
     }
+    g_stage = kStageFg;
     if (g_xessSc) { xessFgFrameStart(g_xeId); g_simOpen = true; }  // next frame starts here: XeLL's sleep after the pacing
     g_tUs[4] += lapUs(t);
     g_lastExit = t;
+    g_stage = kStageGame;
     return hr;
 }
