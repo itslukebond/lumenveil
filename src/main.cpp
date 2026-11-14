@@ -855,6 +855,7 @@ static PFN_Present o_Present; static PFN_Present1 o_Present1;
 static void checkDeviceRemoved();
 static void onPresent(IDXGISwapChain* sc) {
     ++g_frame;
+    dlssEndFrame();
     if (g_frame % 60 == 1) { DXGI_SWAP_CHAIN_DESC d; if (SUCCEEDED(sc->GetDesc(&d))) dlssSetDisplaySize(d.BufferDesc.Width, d.BufferDesc.Height); }
     if (g_frame % 30 == 0) checkDeviceRemoved();
     static LARGE_INTEGER freq, last, prev; static unsigned long long lastFrame;

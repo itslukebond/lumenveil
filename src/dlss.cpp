@@ -1,5 +1,6 @@
 // Replaces FFXV's TAA resolve with DLSS Super Resolution / DLAA (NGX D3D11).
 #include "common.h"
+#include "history_rules.h"
 #include <d3d11_1.h>
 #include <d3dcompiler.h>
 #include <wincodec.h>
@@ -23,16 +24,17 @@ Texture2D<float4> velIn : register(t1);
 RWTexture2D<float2> mvOut : register(u0);
 RWTexture2D<float> depthOut : register(u1);
 
-// Same decode as the game's TAA: velocity.y == 1 marks "use camera reprojection",
-// |velocity.x| >= 4 carries a flag bit that is stripped.
+// Same decode as the game's TAA while playing: velocity.y == 1 marks "use camera reprojection", |velocity.x| >= 4
+// carries a flag bit that is stripped. While paused it differs: no motion at all.
 [numthreads(8, 8, 1)]
 void main(uint2 id : SV_DispatchThreadID) {
     if (id.x >= (uint)g_screenSize.x || id.y >= (uint)g_screenSize.y) return;
     float2 uv = (id + 0.5) * g_screenSize.zw;
     float d = depthIn[id];
+    if (g_gamePaused == 0) { mvOut[id] = 0; depthOut[id] = d; return; }  // paused (the field reads 0): the still image holds still
     float4 vel = velIn[id];
     float2 prevUV;
-    if (vel.y == 1.0 || g_gamePaused == 0) {
+    if (vel.y == 1.0) {
         float4 p = float4(uv, d, 1);
         float x = dot(float4(g_motionMatrix[0].x, g_motionMatrix[1].x, g_motionMatrix[2].x, g_motionMatrix[3].x), p);
         float y = dot(float4(g_motionMatrix[0].y, g_motionMatrix[1].y, g_motionMatrix[2].y, g_motionMatrix[3].y), p);
@@ -144,6 +146,7 @@ UINT g_texW, g_texH;
 bool g_ready, g_failed;
 std::atomic<bool> g_enabled{true};
 std::atomic<bool> g_reset{true};
+HistoryGate g_hist;  // render thread only: was there a successful run this game frame (history_rules.h)
 std::string g_shotTag;
 std::atomic<bool> g_shot{false};
 FgFrame g_fg;
@@ -557,6 +560,7 @@ DlssInfo dlssInfo() {
 }
 void dlssSetUpscaler(int u) { g_upscaler = u; g_failed = false; g_reset = true; logf("upscaler setting %d", u); }
 void dlssSetSharpness(int percent) { g_sharp = percent; }
+void dlssEndFrame() { if (g_hist.endFrame()) g_reset = true; }
 void dlssToggle() { g_enabled = !g_enabled; g_reset = true; logf("dlss: %s", g_enabled ? "ON" : "OFF (game TAA)"); }
 void dlssRequestShot(const char* tag) { g_shotTag = tag; g_shot = true; }
 
@@ -636,7 +640,13 @@ bool dlssReplaceTaa(ID3D11DeviceContext* ctx) {
             ev.InRenderSubrectDimensions = { inW, inH };
             ev.InMVScaleX = (float)inW;
             ev.InMVScaleY = (float)inH;
-            ev.InReset = g_reset.exchange(false) ? 1 : 0;
+            const bool reset = g_reset.exchange(false);
+            ev.InReset = reset ? 1 : 0;
+            if (reset && g_hist.gap) {  // after menus, the map, loading or a video: the first lines, then every 500th
+                static unsigned fresh;
+                if (++fresh <= 50 || fresh % 500 == 0)
+                    logf("dlss: fresh history after %u frames without the upscaler (%u so far)", g_hist.gap, fresh);
+            }
             static int traced;
             if (traced < 2) { logf("dlss: evaluate #%d jitter %.3f,%.3f px reset %d", traced, ev.InJitterOffsetX, ev.InJitterOffsetY, ev.InReset); flushLog(); }
             // DLSS wants >= 8 * (out/in)^2 jitter phases (32 at 2x): log how many the game's sequence has, once.
@@ -668,7 +678,7 @@ bool dlssReplaceTaa(ID3D11DeviceContext* ctx) {
                 if (NVSDK_NGX_FAILED(r)) { logf("dlss: evaluate failed %08x", r); ok = false; }
             }
             if (traced < 2) ++traced;  // both upscalers: the start-up trace above is two frames, not the whole session
-            if (ok) { g_fg = { g_mvTex, g_depthTex, inW, inH, taa, { jitter[0], jitter[1] } }; g_fgReady = true; }
+            if (ok) { g_fg = { g_mvTex, g_depthTex, inW, inH, taa, { jitter[0], jitter[1] } }; g_fgReady = true; g_hist.upscaled(); }
             if (ok && sharpen) {
                 const float c[4] = { g_sharp / 100.f };
                 ctx->UpdateSubresource(g_sharpCB, 0, nullptr, c, 0, 0);

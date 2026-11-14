@@ -32,6 +32,7 @@ bool dlssTakeFrame(FgFrame* out);                 // true once per frame in whic
 // dlss.cpp
 bool dlssEnabled();
 void dlssToggle();
+void dlssEndFrame();                             // at each game Present: a frame without an upscaler run resets its history
 // in/out are 0 until DLSS first runs; disp = game swapchain; sharpness 0..100 (%); version "" until DLSS loads
 // upscaler: the setting (-1 auto, else an upscaler id); active: what runs (-1 none / game TAA, else an upscaler id).
 // Upscaler ids: 0 DLSS, 1 FSR, 2 XeSS. Each upscaler other than DLSS has its own version string.
