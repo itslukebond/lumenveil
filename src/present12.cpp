@@ -11,6 +11,7 @@
 #include "fg_select.h"
 #include "xess_rules.h"
 #include "antilag_rules.h"
+#include "colour_space.h"
 #include <d3d11_4.h>
 #include <d3d12.h>
 #include <dxgi1_6.h>
@@ -463,16 +464,40 @@ void noteXessFormat(bool want, unsigned format) {
     g_xessRefused = refused;
 }
 
+static_assert(DXGI_FORMAT_R16G16B16A16_FLOAT == colour::kRgba16Float && DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709 == colour::kSrgb &&
+              DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709 == colour::kScRgb, "colour_space.h values");
+
+// Our swapchain's colour space after a format change or a replacement (colour_space.h): the game's own if it set one and
+// ours can present it at this format, else the format's default. Under Wine only the game's own is passed on, as in
+// 1.0.1: DXVK works the colour space out again after a resize, and setting one there could replace an NVAPI HDR10 one.
+static void setColourSpace(DXGI_FORMAT format) {
+    if (g_wine) {
+        if (g_colorSpace >= 0) g_sc->SetColorSpace1(DXGI_COLOR_SPACE_TYPE(g_colorSpace));
+        return;
+    }
+    UINT support = 0;
+    const bool supported = g_colorSpace >= 0 &&
+        SUCCEEDED(g_sc->CheckColorSpaceSupport(DXGI_COLOR_SPACE_TYPE(g_colorSpace), &support)) &&
+        (support & DXGI_SWAP_CHAIN_COLOR_SPACE_SUPPORT_FLAG_PRESENT);
+    const unsigned cs = colour::presentColourSpace(format, g_colorSpace, supported);
+    logf("d3d12: colour space %u for fmt %u: %08x", cs, format, g_sc->SetColorSpace1(DXGI_COLOR_SPACE_TYPE(cs)));
+}
+
 // Our swapchain for the game's new size and format, called with frame generation off and the targets released (the
 // queue is idle). It is Intel's while XeSS-FG is this launch's backend and the format is one XeSS-FG takes, else a plain
 // one: the same kind is resized, a change of kind replaces it on the same window. Format 0 keeps the current format.
 // Leaves g_sc null only if no swapchain could be made.
 HRESULT fitSwapchain(UINT w, UINT h, DXGI_FORMAT format) {
     DXGI_SWAP_CHAIN_DESC1 sd; g_sc->GetDesc1(&sd);
+    const DXGI_FORMAT oldFormat = sd.Format;
     if (format == DXGI_FORMAT_UNKNOWN) format = sd.Format;
     const bool want = xessFgWanted(g_xessFg, format);
     noteXessFormat(want, format);
-    if (want == g_xessSc) return g_sc->ResizeBuffers(0, w, h, format, g_scFlags);
+    if (want == g_xessSc) {
+        const HRESULT hr = g_sc->ResizeBuffers(0, w, h, format, g_scFlags);
+        if (SUCCEEDED(hr) && format != oldFormat && !g_wine) setColourSpace(format);  // Windows: see setColourSpace
+        return hr;
+    }
     Busy busy;
     sd.Width = w; sd.Height = h; sd.Format = format; sd.Flags = g_scFlags;
     sd.BufferCount = kBuffers; sd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD; sd.SampleDesc = { 1, 0 }; sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
@@ -493,7 +518,7 @@ HRESULT fitSwapchain(UINT w, UINT h, DXGI_FORMAT format) {
     if (SUCCEEDED(hr)) { hr = sc1->QueryInterface(IID_PPV_ARGS(&g_sc)); sc1->Release(); }
     logf("d3d12: swapchain replaced by %s %ux%u fmt %u: %08x", g_xessSc ? "Intel's frame generation one" : "a plain one", w, h, format, hr);
     if (FAILED(hr)) { g_xessSc = false; if (want) xessFgDestroy(); return hr; }
-    if (g_colorSpace >= 0) g_sc->SetColorSpace1(DXGI_COLOR_SPACE_TYPE(g_colorSpace));
+    setColourSpace(format);
     if (g_xessSc) { xessFgFrameStart(g_xeId); g_simOpen = true; }  // opens the first frame, as p12Init does
     return hr;
 }
@@ -549,6 +574,7 @@ HWND reattach(HWND wnd, const DXGI_SWAP_CHAIN_DESC1* desc) {
     g_validRun = 0;
     releaseTargets();
     g_game = nullptr;
+    g_colorSpace = -1;  // the colour space the game set belonged to its old swapchain
     UINT w = desc->Width, h = desc->Height;
     if (!w || !h) { RECT r; GetClientRect(wnd, &r); w = r.right; h = r.bottom; }
     HRESULT hr = fitSwapchain(w, h, desc->Format);
