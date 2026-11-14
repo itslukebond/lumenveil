@@ -303,7 +303,132 @@ static void emptySlots() {
     CHECK(!c.logDue(1000 + 30001)); CHECK(!c.logDue(1000 + 900000));
 }
 
+// A value typed into a setting's box: what a person would type (spaces, a % sign, a fraction, a sign) is read and
+// clamped to the setting's range; nothing usable keeps the value as it was. Ranges are the menu's (0 to 200, 0 to 100).
+static void typed() {
+    CHECK(typedValue("150", 0, 200, 100) == 150);
+    CHECK(typedValue("0", 0, 200, 100) == 0);
+    CHECK(typedValue("200", 0, 200, 100) == 200);
+    CHECK(typedValue("  75  ", 0, 200, 100) == 75);
+    CHECK(typedValue("150%", 0, 200, 100) == 150);
+    CHECK(typedValue("150 %", 0, 200, 100) == 150);
+    CHECK(typedValue("007", 0, 200, 100) == 7);
+    CHECK(typedValue("999", 0, 200, 100) == 200);              // over the top: the top
+    CHECK(typedValue("99999999999999999999", 0, 200, 100) == 200);
+    CHECK(typedValue("101", 0, 100, 30) == 100);
+    CHECK(typedValue("-5", 0, 200, 100) == 0);                 // below the bottom: the bottom
+    CHECK(typedValue("+40", 0, 200, 100) == 40);
+    CHECK(typedValue("150.4", 0, 200, 100) == 150);            // fractions round to the nearest whole
+    CHECK(typedValue("150.5", 0, 200, 100) == 151);
+    CHECK(typedValue(".5", 0, 200, 100) == 1);
+    CHECK(typedValue("", 0, 200, 100) == 100);                 // nothing usable: unchanged
+    CHECK(typedValue("   ", 0, 200, 60) == 60);
+    CHECK(typedValue("abc", 0, 200, 100) == 100);
+    CHECK(typedValue("1x5", 0, 200, 100) == 100);
+    CHECK(typedValue("1 5", 0, 200, 100) == 100);
+    CHECK(typedValue("-", 0, 200, 100) == 100);
+    CHECK(typedValue("%", 0, 200, 100) == 100);
+    CHECK(typedValue("1.2.3", 0, 200, 100) == 100);
+    CHECK(typedValue("10*2", 0, 200, 100) == 100);
+}
+
+// A setting's typed box, driven as a player would: a click on the box, keys through TypingFeed (Windows key codes),
+// in a headless Dear ImGui context. Enter sets the typed value (clamped), Esc leaves it, Up and Down step it at once;
+// left and right on the controller still step the slider and never move to the box.
+static int g_box = 100;
+static bool g_typing;
+static ImVec2 g_boxMin, g_boxMax;
+static bool boxFrame(TypingFeed& keys, const int* down, bool click, bool focusSlider = false, uint16_t pad = 0) {
+    ImGuiIO& io = ImGui::GetIO();
+    keys.feed(io, [&](int vk) { for (const int* d = down; d && *d; ++d) if (*d == vk) return true; return false; });
+    const ImVec2 mid((g_boxMin.x + g_boxMax.x) * 0.5f, (g_boxMin.y + g_boxMax.y) * 0.5f);
+    if (focusSlider || pad) io.AddMousePosEvent(-FLT_MAX, -FLT_MAX);  // the controller alone
+    else io.AddMousePosEvent(mid.x, mid.y);
+    io.AddMouseButtonEvent(0, click);
+    feedPad(io, tapOf(pad), true);
+    ImGui::NewFrame();
+    ImGui::SetNextWindowPos(ImVec2(0, 0)); ImGui::SetNextWindowSize(ImVec2(600, 200));
+    ImGui::Begin("box", nullptr, ImGuiWindowFlags_NoSavedSettings);
+    if (focusSlider) focusFirst();
+    g_typing = false;
+    const bool changed = typedSlider("##game", g_box, 0, 200, 5, "%d%%", 64, &g_typing);
+    g_boxMin = ImGui::GetItemRectMin(); g_boxMax = ImGui::GetItemRectMax();
+    ImGui::End();
+    ImGui::Render();
+    return changed;
+}
+static void press(TypingFeed& keys, int vk) {
+    const int down[] = { vk, 0 };
+    boxFrame(keys, down, false);
+    boxFrame(keys, nullptr, false);
+}
+static void typedBox() {
+    ImGuiContext* ctx = ImGui::CreateContext();
+    ImGuiIO& io = ImGui::GetIO();
+    io.IniFilename = nullptr;
+    io.DisplaySize = ImVec2(800, 600);
+    io.DeltaTime = 1.0f / 60;
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
+    io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
+    unsigned char* px; int w, h;
+    io.Fonts->GetTexDataAsRGBA32(&px, &w, &h);
+    TypingFeed keys;
+    auto clickBox = [&] { boxFrame(keys, nullptr, true); boxFrame(keys, nullptr, false); };
+
+    boxFrame(keys, nullptr, false); boxFrame(keys, nullptr, false);   // laid out: the box's place is known
+    CHECK(g_boxMax.x - g_boxMin.x == 64);                              // the box keeps its width
+    CHECK(!g_typing);
+    clickBox();
+    CHECK(g_typing);                                                   // a click on the box starts typing
+    press(keys, '1'); press(keys, '5'); press(keys, '0');
+    CHECK(g_box == 100);                                               // nothing set until Enter
+    press(keys, 0x0D);                                                 // Enter
+    CHECK(g_box == 150);
+    boxFrame(keys, nullptr, false);
+    CHECK(!g_typing);
+
+    clickBox(); press(keys, '9'); press(keys, '9'); press(keys, '9'); press(keys, 0x0D);
+    CHECK(g_box == 200);                                               // over the top: the top
+    clickBox(); press(keys, 0x60 + 4); press(keys, 0x6E); press(keys, 0x60 + 6); press(keys, 0x0D);  // keypad 4.6
+    CHECK(g_box == 5);                                                 // rounded
+    clickBox(); press(keys, '4'); press(keys, '2'); press(keys, 0x1B); // Esc
+    CHECK(g_box == 5);                                                 // left as it was
+    boxFrame(keys, nullptr, false);
+    CHECK(!g_typing);
+    clickBox(); press(keys, 0x26);                                     // Up: at once
+    CHECK(g_box == 6);
+    press(keys, 0x28); press(keys, 0x28);                              // Down twice
+    CHECK(g_box == 4);
+    press(keys, 0x0D);
+    CHECK(g_box == 4);
+    clickBox(); press(keys, 0x08); press(keys, 0x0D);                  // everything deleted, then Enter: unchanged
+    CHECK(g_box == 4);
+
+    // the controller, in a menu just opened (focus on its first setting): right on the slider steps it by 5 and the
+    // focus stays on the slider
+    ImGui::DestroyContext(ctx);
+    ctx = ImGui::CreateContext();
+    ImGuiIO& io2 = ImGui::GetIO();
+    io2.IniFilename = nullptr; io2.DisplaySize = ImVec2(800, 600); io2.DeltaTime = 1.0f / 60;
+    io2.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad; io2.BackendFlags |= ImGuiBackendFlags_HasGamepad;
+    io2.Fonts->GetTexDataAsRGBA32(&px, &w, &h);
+    keys = TypingFeed{};
+    g_box = 100;
+    boxFrame(keys, nullptr, false, true); boxFrame(keys, nullptr, false);
+    CHECK(GImGui->NavId != 0);                                         // the slider has the focus
+    const unsigned slider = GImGui->NavId;
+    boxFrame(keys, nullptr, false, false, kRight); boxFrame(keys, nullptr, false);
+    CHECK(g_box == 105);
+    CHECK(GImGui->NavId == slider);
+    boxFrame(keys, nullptr, false, false, kRight); boxFrame(keys, nullptr, false);
+    CHECK(g_box == 110);
+    CHECK(GImGui->NavId == slider);
+    ImGui::DestroyContext(ctx);
+}
+
 int main() {
+    typed();
+    typedBox();
     emptySlots();
     comboHold();
     slots();

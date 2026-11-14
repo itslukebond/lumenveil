@@ -62,6 +62,7 @@ pad::PadSlots g_pad;
 pad::EmptySlots g_emptySlots;  // empty controller slots answered from the cache (the hook) and their counts (logged once)
 pad::PadView g_padView;
 bool g_padUsed, g_padOpened, g_padBusy, g_padRelease;
+bool g_typing;  // last frame a setting's box was being typed in: Esc then leaves the box, not the menu
 static_assert(pad::kUp == XINPUT_GAMEPAD_DPAD_UP && pad::kDown == XINPUT_GAMEPAD_DPAD_DOWN && pad::kLeft == XINPUT_GAMEPAD_DPAD_LEFT &&
               pad::kRight == XINPUT_GAMEPAD_DPAD_RIGHT && pad::kL3 == XINPUT_GAMEPAD_LEFT_THUMB && pad::kR3 == XINPUT_GAMEPAD_RIGHT_THUMB &&
               pad::kA == XINPUT_GAMEPAD_A && pad::kB == XINPUT_GAMEPAD_B && pad::kStickDeadzone == XINPUT_GAMEPAD_LEFT_THUMB_DEADZONE,
@@ -564,10 +565,21 @@ void drawMenu() {
         if (*di.version && atoi(di.version) < 310)
             ImGui::TextColored(kAmber, "DLSS %s is older than 310: models J, K, L and M need 310 or newer, so NVIDIA's default is used.", di.version);
     }
+    // the two sharpening rows: a slider and a box the value can be typed into, the same width in both rows
+    const float boxW = 64 * g_scale;
+    bool typing = false;
     int sharp = di.sharpness;
     label("Sharpening");
-    const bool sharpChanged = pad::padSlider("##sharp", sharp, 0, 100, 1, sharp ? "%d%%" : "Off");
+    const bool sharpChanged = pad::typedSlider("##sharp", sharp, 0, 100, 1, sharp ? "%d%%" : "Off", boxW, &typing);
     if (sharpChanged) { dlssSetSharpness(sharp); iniSet(L"dlss", L"sharpness", sharp); }
+    int gameSharp = gameSharpenGet();
+    label("Game sharpening");
+    ImGui::SetItemTooltip("The game's own sharpening, after anti-aliasing. 100%% is the game's look.");
+    if (pad::typedSlider("##gamesharp", gameSharp, 0, 200, 5, gameSharp ? "%d%%" : "Off", boxW, &typing)) {
+        gameSharpenSet(gameSharp);
+        iniSet(L"dlss", L"game_sharpening", gameSharp);
+    }
+    g_typing = typing;
 
     // ---- Frame Generation: its controls take the colour of the backend picked, the readouts that of the one running
     ImGui::SeparatorText("Frame Generation");
@@ -833,6 +845,7 @@ void closeMenu() {
     g_open = false;
     g_padUsed = false;
     g_padRelease = true;
+    g_typing = false;
 }
 
 void pollToggle() {
@@ -850,7 +863,7 @@ void pollToggle() {
     }
     const bool stickCombo = combo.update(focused && g_padView.comboDown, tick);  // both sticks held in for half a second
     const bool bClose = g_open && !g_padBusy && (g_padView.edges & pad::kB);
-    if ((ins && !insDown) || (esc && !escDown && g_open) || stickCombo || bClose) {
+    if ((ins && !insDown) || (esc && !escDown && g_open && !g_typing) || stickCombo || bClose) {
         if (g_open) closeMenu();
         else {
             g_open = true;
@@ -998,6 +1011,9 @@ bool compose(IDXGISwapChain3* sc, UINT index, bool layer) {
     io.DisplaySize = { float(g_w), float(g_h) };
     io.MouseDrawCursor = g_open;
     feedMouse(io);
+    static pad::TypingFeed keys;  // for the settings' boxes; every key up once the menu closes or the game is not in front
+    const bool front = g_open && GetForegroundWindow() == g_wnd;
+    keys.feed(io, [front](int vk) { return front && (GetAsyncKeyState(vk) & 0x8000) != 0; });
     if (g_open) {
         if (g_padView.connected) io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
         else io.BackendFlags &= ~ImGuiBackendFlags_HasGamepad;

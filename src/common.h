@@ -41,6 +41,8 @@ DlssInfo dlssInfo();
 void dlssSetUpscaler(int u);                     // live
 void dlssSetPreset(int preset);                  // render preset (0 = SDK default, 10..13 = J..M, 5/6 = E/F); applied on the next DLSS frame
 void dlssSetSharpness(int percent);              // CAS after DLSS, 0 = off; live
+void gameSharpenSet(int percent);                // the game's own sharpening, percent of its strength (0 to 200, 100 = as the game); live
+int gameSharpenGet();
 bool dlssReplaceTaa(ID3D11DeviceContext* ctx);   // true = DLSS ran, skip the game's TAA draw
 void dlssAfterTaa(ID3D11DeviceContext* ctx);     // screenshot hook after either path
 // Upscaling below 100% render scale: DLSS outputs display res; the tonemap runs at display res and the blit to the

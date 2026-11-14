@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include "imgui.h"
 #include "imgui_internal.h"  // ImGuiContext::ActiveIdSource: tells a slider adjusted with A from one dragged with the mouse
@@ -113,6 +114,28 @@ struct EmptySlots {
     }
 };
 
+// A value typed into a setting's box, clamped to lo..hi: a number with optional spaces around it, a sign, a fraction
+// (rounded to the nearest whole) and a % sign after it. Anything else, or nothing, gives keep.
+inline int typedValue(const char* text, int lo, int hi, int keep) {
+    const char* p = text;
+    while (*p == ' ') ++p;
+    const bool neg = *p == '-';
+    if (*p == '-' || *p == '+') ++p;
+    double v = 0, scale = 1;
+    bool digits = false, point = false;
+    for (; (*p >= '0' && *p <= '9') || (*p == '.' && !point); ++p) {
+        if (*p == '.') { point = true; continue; }
+        digits = true;
+        if (point) v += (scale /= 10) * (*p - '0');
+        else if (v < 1e9) v = v * 10 + (*p - '0');  // past this it only clamps to hi
+    }
+    while (*p == ' ') ++p;
+    if (*p == '%') { ++p; while (*p == ' ') ++p; }
+    if (!digits || *p) return keep;
+    const double r = neg ? -(v + 0.5) : v + 0.5;
+    return r < lo ? lo : r > hi ? hi : int(r);
+}
+
 // Both sticks held in: true once when the hold reaches kHoldMs; again only after a release. Present thread only.
 struct ComboHold {
     uint64_t since = 0;
@@ -199,6 +222,69 @@ inline bool padTick(bool& v) {
     if (!d || (d > 0) == v) return false;
     v = d > 0;
     return true;
+}
+
+// The keys a setting's box takes, by Windows virtual-key code; menu.cpp polls them while the menu is open (the game
+// sees no keys then). A digit key types its digit whatever the keyboard layout, with or without Shift.
+struct TypingKey { int vk; ImGuiKey key; char ch; };
+constexpr TypingKey kTypingKeys[] = {
+    { 0x08, ImGuiKey_Backspace, 0 }, { 0x0D, ImGuiKey_Enter, 0 }, { 0x1B, ImGuiKey_Escape, 0 }, { 0x23, ImGuiKey_End, 0 },
+    { 0x24, ImGuiKey_Home, 0 }, { 0x25, ImGuiKey_LeftArrow, 0 }, { 0x26, ImGuiKey_UpArrow, 0 }, { 0x27, ImGuiKey_RightArrow, 0 },
+    { 0x28, ImGuiKey_DownArrow, 0 }, { 0x2E, ImGuiKey_Delete, 0 },
+    { 0x30, ImGuiKey_0, '0' }, { 0x31, ImGuiKey_1, '1' }, { 0x32, ImGuiKey_2, '2' }, { 0x33, ImGuiKey_3, '3' }, { 0x34, ImGuiKey_4, '4' },
+    { 0x35, ImGuiKey_5, '5' }, { 0x36, ImGuiKey_6, '6' }, { 0x37, ImGuiKey_7, '7' }, { 0x38, ImGuiKey_8, '8' }, { 0x39, ImGuiKey_9, '9' },
+    { 0x60, ImGuiKey_Keypad0, '0' }, { 0x61, ImGuiKey_Keypad1, '1' }, { 0x62, ImGuiKey_Keypad2, '2' }, { 0x63, ImGuiKey_Keypad3, '3' },
+    { 0x64, ImGuiKey_Keypad4, '4' }, { 0x65, ImGuiKey_Keypad5, '5' }, { 0x66, ImGuiKey_Keypad6, '6' }, { 0x67, ImGuiKey_Keypad7, '7' },
+    { 0x68, ImGuiKey_Keypad8, '8' }, { 0x69, ImGuiKey_Keypad9, '9' },
+    { 0x6D, ImGuiKey_KeypadSubtract, '-' }, { 0x6E, ImGuiKey_KeypadDecimal, '.' }, { 0xBD, ImGuiKey_Minus, '-' }, { 0xBE, ImGuiKey_Period, '.' },
+};
+// Feeds those keys to the menu: each one that went down or up since the last call, and the character of one that went
+// down. down(vk) says whether a key is held now. Present thread only.
+struct TypingFeed {
+    bool was[sizeof kTypingKeys / sizeof *kTypingKeys] = {};
+    template <class Down> void feed(ImGuiIO& io, Down down) {
+        for (size_t i = 0; i < sizeof kTypingKeys / sizeof *kTypingKeys; ++i) {
+            const bool d = down(kTypingKeys[i].vk);
+            if (d == was[i]) continue;
+            was[i] = d;
+            io.AddKeyEvent(kTypingKeys[i].key, d);
+            if (d && kTypingKeys[i].ch) io.AddInputCharacter(kTypingKeys[i].ch);
+        }
+    }
+};
+
+// A setting's slider (padSlider) and, beside it, a box boxW wide that the value can be typed into: Enter sets the typed
+// value (typedValue, clamped to lo..hi), Esc leaves it as it was, Up and Down step it by 1 at once. The box is left out
+// of controller navigation, so left and right on the slider still step it. *typing is set while the box is being typed
+// in. True when the value changed.
+inline bool typedSlider(const char* id, int& v, int lo, int hi, int step, const char* fmt, float boxW, bool* typing) {
+    ImGui::PushID(id);
+    const float sp = ImGui::GetStyle().ItemSpacing.x;
+    ImGui::SetNextItemWidth(std::max(1.0f, ImGui::GetContentRegionAvail().x - boxW - sp));
+    bool changed = padSlider("##slider", v, lo, hi, step, fmt);
+    ImGui::SameLine(0, sp);
+    ImGui::SetNextItemWidth(boxW);
+    struct Step { int lo, hi, v; bool stepped; } st = { lo, hi, v, false };
+    auto arrows = [](ImGuiInputTextCallbackData* d) {  // Up / Down: the value one up or down, set at once
+        Step& s = *static_cast<Step*>(d->UserData);
+        s.v = std::clamp(typedValue(d->Buf, s.lo, s.hi, s.v) + (d->EventKey == ImGuiKey_UpArrow ? 1 : -1), s.lo, s.hi);
+        s.stepped = true;
+        char t[16]; std::snprintf(t, sizeof t, "%d", s.v);
+        d->DeleteChars(0, d->BufTextLen); d->InsertChars(0, t); d->SelectAll();
+        return 0;
+    };
+    char buf[16];
+    std::snprintf(buf, sizeof buf, "%d", v);
+    ImGui::PushItemFlag(ImGuiItemFlags_NoNav, true);
+    const bool enter = ImGui::InputText("##box", buf, sizeof buf, ImGuiInputTextFlags_CharsDecimal | ImGuiInputTextFlags_EnterReturnsTrue |
+                                        ImGuiInputTextFlags_AutoSelectAll | ImGuiInputTextFlags_CallbackHistory, arrows, &st);
+    ImGui::PopItemFlag();
+    if (ImGui::IsItemActive()) *typing = true;
+    const int now = enter ? typedValue(buf, lo, hi, v) : st.stepped ? st.v : v;
+    changed |= now != v;
+    v = now;
+    ImGui::PopID();
+    return changed;
 }
 
 // On the frame the combo opened the menu, right after Begin: the menu takes the focus and shows the outline at once,

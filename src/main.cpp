@@ -1,6 +1,7 @@
 // Lumenveil: dxgi.dll proxy and the Direct3D 11 hooks.
 #include <windows.h>
 #include <d3d11.h>
+#include <d3d11_1.h>
 #include <d3dcompiler.h>
 #include <d3d12.h>
 #include <dxgi1_2.h>
@@ -14,6 +15,7 @@
 #include <unordered_map>
 #include "forward_list.h"
 #include "common.h"
+#include "game_sharpen.h"
 #include "proton_env.h"
 #include "reshade_chain.h"
 #include <wincodec.h>
@@ -84,6 +86,12 @@ static void registerShader(void* obj, const void* code, SIZE_T len) {
 static ID3D11DeviceContext* g_imm;
 static ID3D11Device* g_device;
 
+// The game's sharpening pass (the pass itself is with the draw hooks, "the game's sharpening pass").
+static void* g_gameSharpPS;  // its pixel shader, once recognised
+static std::atomic<int> g_gameSharpPct{ 100 };  // the menu's setting: percent of the game's strength
+static std::atomic<unsigned> g_gsBinds, g_gsOtherBinds;  // times it was bound on the immediate context / on another
+static void gameSharpenCount(ID3D11DeviceContext* ctx, int idx);
+
 // ---- context hooks ----------------------------------------------------------
 // Immediate and deferred contexts may have distinct vtables; originals are kept per vtable.
 static void* g_ctxVt[2];
@@ -95,7 +103,7 @@ template <class F> static F orig(void* obj, int idx) {
 static void noteUiDraw(ID3D11DeviceContext* ctx);
 #define CTX_HOOK(idx, name, compute, sig, args, la, lb)                                         \
     static void STDMETHODCALLTYPE hk_##name sig {                                               \
-        if (!compute) noteUiDraw(ctx);                                                          \
+        if (!compute) { noteUiDraw(ctx); gameSharpenCount(ctx, idx); }                          \
         orig<void(STDMETHODCALLTYPE*) sig>(ctx, idx) args;                                      \
     }
 CTX_HOOK(20, DrawIndexedInstanced, false, (ID3D11DeviceContext* ctx, UINT c, UINT i, UINT s, INT b, UINT si), (ctx, c, i, s, b, si), c, i)
@@ -317,6 +325,7 @@ static void STDMETHODCALLTYPE hk_PSSetSamplers(ID3D11DeviceContext* ctx, UINT st
 
 static void STDMETHODCALLTYPE hk_PSSetShader(ID3D11DeviceContext* ctx, ID3D11PixelShader* ps, ID3D11ClassInstance* const* ci, UINT n) {
     if (ctx == g_imm) g_immPS = ps;
+    if (ps && ps == g_gameSharpPS) ++(ctx == g_imm ? g_gsBinds : g_gsOtherBinds);
     if (g_uiFix && ps)
         for (int i = 0; i < 2; ++i) {
             if (ps == g_fontGame[i] && g_fontOurs[i] && !g_glyphSRV) ps = g_fontOurs[i];  // 2x atlas: game's own shader
@@ -392,11 +401,235 @@ static void hudlessReplay(ID3D11DeviceContext* ctx, UINT c, UINT start) {
     for (auto* x : srv) if (x) x->Release();
 }
 
+// ---- the game's sharpening pass -------------------------------------------------------
+// The menu's "Game sharpening" scales the strength the game gives the sharpening pass it draws after anti-aliasing.
+// At the pass's draw, our compute shader copies the constants bound for it with the strength multiplied, the pass draws
+// with that copy at b0, and the game's buffer is bound again. At 100% the draw is the game's, untouched. Render thread
+// only, apart from the setting and the bind counts.
+static const char kGsHlsl[] = R"(
+cbuffer In : register(b0) { float4 c[4096]; };
+cbuffer P : register(b1) { float m; uint n; uint2 unused; };
+RWBuffer<float4> Out : register(u0);
+RWBuffer<float4> Log : register(u1);
+[numthreads(64, 1, 1)]
+void main(uint i : SV_DispatchThreadID) {
+    if (i >= n) return;
+    float4 v = c[i];
+    if (i == 0) Log[0] = c[32];
+    if (i == 32) v.x *= m;  // the strength
+    Out[i] = v;
+}
+)";
+constexpr UINT kGsStrength = 32;  // the strength is .x of constant 32
+static ID3D11ComputeShader* g_gsCS;
+static ID3D11Buffer *g_gsParam, *g_gsLog, *g_gsStage, *g_gsOut, *g_gsCB;
+static ID3D11UnorderedAccessView *g_gsLogUAV, *g_gsOutUAV;
+static UINT g_gsOutBytes;
+static bool g_gsBroken;  // our objects could not be made: the pass draws as the game's
+static unsigned g_gsDraws[6];  // draws while it is bound on the immediate context, by draw call (kGsDrawNames)
+static const char* const kGsDrawNames[6] = { "Draw", "DrawIndexed", "DrawInstanced", "DrawIndexedInstanced", "DrawInstancedIndirect", "DrawIndexedInstancedIndirect" };
+static struct {
+    unsigned long long id, sampleFrame, taaFrame;  // the shader's id; frame of the last sample; of the first TAA draw
+    unsigned drawsAtSample, lines, cbBytes, w, h, fmt;
+    float rate, strength = -1;  // draws per frame over the last 600 frames; the game's strength last logged
+    int setting = -1;
+    bool started, pending, notDrawnLogged;
+} g_gs;
+
+void gameSharpenSet(int percent) { g_gameSharpPct = gameSharpenPercent(percent, true); }
+int gameSharpenGet() { return g_gameSharpPct; }
+
+// At load, when the game creates its sharpening shader: our compute shader and the small buffers. Nothing here costs
+// a frame.
+static void gameSharpenMake(ID3D11Device* d, void* ps, const void* code, SIZE_T len) {
+    if (g_gameSharpPS || crc32(code, len) != kGameSharpenCrc) return;
+    unsigned long long h = 0;
+    if (len >= 20) memcpy(&h, (const char*)code + 4, 8);
+    logf("game sharpening: shader %016llx recognised", h);
+    g_gs.id = h;
+    wchar_t sys[MAX_PATH]; GetSystemDirectoryW(sys, MAX_PATH); wcscat_s(sys, L"\\d3dcompiler_47.dll");
+    auto compile = (pD3DCompile)GetProcAddress(LoadLibraryW(sys), "D3DCompile");
+    ID3DBlob *bc = nullptr, *err = nullptr;
+    HRESULT hr = compile ? compile(kGsHlsl, strlen(kGsHlsl), "ffxv_game_sharpen", nullptr, nullptr, "main", "cs_5_0",
+                                   D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &bc, &err) : E_FAIL;
+    if (SUCCEEDED(hr)) hr = d->CreateComputeShader(bc->GetBufferPointer(), bc->GetBufferSize(), nullptr, &g_gsCS);
+    D3D11_BUFFER_DESC bd = { 16, D3D11_USAGE_DEFAULT, D3D11_BIND_CONSTANT_BUFFER, 0, 0, 0 };
+    if (SUCCEEDED(hr)) hr = d->CreateBuffer(&bd, nullptr, &g_gsParam);
+    bd.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
+    if (SUCCEEDED(hr)) hr = d->CreateBuffer(&bd, nullptr, &g_gsLog);
+    D3D11_UNORDERED_ACCESS_VIEW_DESC ud = {};
+    ud.Format = DXGI_FORMAT_R32G32B32A32_FLOAT; ud.ViewDimension = D3D11_UAV_DIMENSION_BUFFER; ud.Buffer.NumElements = 1;
+    if (SUCCEEDED(hr)) hr = d->CreateUnorderedAccessView(g_gsLog, &ud, &g_gsLogUAV);
+    bd = { 16, D3D11_USAGE_STAGING, 0, D3D11_CPU_ACCESS_READ, 0, 0 };
+    if (SUCCEEDED(hr)) hr = d->CreateBuffer(&bd, nullptr, &g_gsStage);
+    if (FAILED(hr)) {
+        logf("game sharpening: setup failed %08x %s; the game's own sharpening stays as it is", hr, err ? (const char*)err->GetBufferPointer() : "");
+        g_gsBroken = true;
+    }
+    if (bc) bc->Release();
+    if (err) err->Release();
+    g_gameSharpPS = ps;
+}
+
+// Our copy of the pass's constants, as a UAV for the compute shader and as the constant buffer the pass then reads,
+// sized for the constants bound for it (recreated if that changes).
+static bool gameSharpenBuffers(UINT bytes) {
+    if (bytes == g_gsOutBytes) return true;
+    for (ID3D11Buffer** b : { &g_gsOut, &g_gsCB }) if (*b) { (*b)->Release(); *b = nullptr; }
+    if (g_gsOutUAV) { g_gsOutUAV->Release(); g_gsOutUAV = nullptr; }
+    g_gsOutBytes = 0;
+    D3D11_BUFFER_DESC bd = { bytes, D3D11_USAGE_DEFAULT, D3D11_BIND_UNORDERED_ACCESS, 0, 0, 0 };
+    HRESULT hr = g_device->CreateBuffer(&bd, nullptr, &g_gsOut);
+    D3D11_UNORDERED_ACCESS_VIEW_DESC ud = {};
+    ud.Format = DXGI_FORMAT_R32G32B32A32_FLOAT; ud.ViewDimension = D3D11_UAV_DIMENSION_BUFFER; ud.Buffer.NumElements = bytes / 16;
+    if (SUCCEEDED(hr)) hr = g_device->CreateUnorderedAccessView(g_gsOut, &ud, &g_gsOutUAV);
+    bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    if (SUCCEEDED(hr)) hr = g_device->CreateBuffer(&bd, nullptr, &g_gsCB);
+    if (FAILED(hr)) {
+        logf("game sharpening: buffers of %u bytes failed %08x; the game's own sharpening stays as it is", bytes, hr);
+        g_gsBroken = true;
+        return false;
+    }
+    g_gsOutBytes = bytes;
+    return true;
+}
+
+static void gameSharpenCount(ID3D11DeviceContext* ctx, int idx) {
+    if (ctx != g_imm || !g_immPS || g_immPS != g_gameSharpPS) return;
+    const int k = idx == 12 ? 1 : idx == 21 ? 2 : idx == 20 ? 3 : idx == 40 ? 4 : idx == 39 ? 5 : 0;
+    ++g_gsDraws[k];
+}
+
+// The strength the game gave the pass, read back a few frames after a sample (never waiting on the GPU), and the log
+// line when it or the setting changed: at most 20 a run.
+static void gameSharpenRead(ID3D11DeviceContext* ctx, int setting) {
+    D3D11_MAPPED_SUBRESOURCE m;
+    if (FAILED(ctx->Map(g_gsStage, 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &m))) return;  // not ready: next draw
+    const float strength = *(const float*)m.pData;
+    ctx->Unmap(g_gsStage, 0);
+    g_gs.pending = false;
+    if (strength == g_gs.strength && setting == g_gs.setting) return;
+    g_gs.strength = strength; g_gs.setting = setting;
+    unsigned top = 0;
+    for (unsigned i = 0; i < 6; ++i) if (g_gsDraws[i] > g_gsDraws[top]) top = i;
+    logf("game sharpening: ps %016llx, game strength %.3f, setting %d%%, %.2f draws/frame (%s), target %ux%u fmt %u, cb %u bytes",
+         g_gs.id, strength, setting, g_gs.rate, kGsDrawNames[top], g_gs.w, g_gs.h, g_gs.fmt, g_gs.cbBytes);
+    flushLog();
+    ++g_gs.lines;
+}
+
+// At each draw of the game's TAA: once, 600 frames after the first TAA draw, if the pass has never been drawn through
+// Draw on the immediate context, say so and name the call it was drawn with, if any (the setting then has no effect).
+static void gameSharpenAfterTaa() {
+    if (!g_gs.taaFrame) g_gs.taaFrame = g_frame ? g_frame : 1;
+    if (!g_gameSharpPS || g_gs.notDrawnLogged || g_frame < g_gs.taaFrame + 600) return;
+    const int other = gameSharpenOtherCall(g_gsDraws);
+    if (other >= 0) {
+        g_gs.notDrawnLogged = true;
+        logf("game sharpening: pass drawn with %s, which the setting does not change (%u draws, binds %u)",
+             kGsDrawNames[other], g_gsDraws[other], g_gsBinds.load());
+        flushLog();
+        return;
+    }
+    if (g_gsDraws[0]) return;
+    g_gs.notDrawnLogged = true;
+    logf("game sharpening: pass not drawn on the immediate context (binds %u, deferred %u)", g_gsBinds.load(), g_gsOtherBinds.load());
+    flushLog();
+}
+
+// The pass's draw (Draw, on the immediate context).
+static void gameSharpenDraw(ID3D11DeviceContext* ctx, UINT c, UINT s) {
+    ++g_gsDraws[0];
+    const int pct = g_gameSharpPct;
+    static ID3D11DeviceContext1* ctx1 = [] {
+        ID3D11DeviceContext1* x = nullptr;
+        g_imm->QueryInterface(__uuidof(ID3D11DeviceContext1), (void**)&x);
+        return x;  // kept for the process, like the context itself
+    }();
+    if (!g_gs.started) { g_gs.started = true; g_gs.sampleFrame = g_frame; g_gs.drawsAtSample = 1; }  // the first window opens
+    if (g_gs.pending) gameSharpenRead(ctx, pct);
+    const bool sample = !g_gs.pending && g_gs.lines < 20 && g_frame >= g_gs.sampleFrame + 600;
+    ID3D11Buffer* game = nullptr;
+    UINT first = 0, num = 0;
+    if (ctx1) ctx1->PSGetConstantBuffers1(0, 1, &game, &first, &num);
+    else ctx->PSGetConstantBuffers(0, 1, &game);
+    D3D11_BUFFER_DESC gd = {};
+    if (game) game->GetDesc(&gd);
+    UINT n = game && first * 16 < gd.ByteWidth ? gd.ByteWidth / 16 - first : 0;  // constants the pass can see
+    if (num && num < n) n = num;
+    if (n > 4096) n = 4096;
+    const bool ranged = ctx1 && (first || (num && num * 16 < gd.ByteWidth));  // bound with an offset or a size
+    if (g_gsBroken || !g_gsCS || n <= kGsStrength || (pct == 100 && !sample) || !gameSharpenBuffers(n * 16)) {
+        orig<PFN_Draw>(ctx, 13)(ctx, c, s);  // the game's draw, nothing of ours bound
+        if (game) game->Release();
+        return;
+    }
+    // our copy of the constants, on the GPU: compute state saved and restored around it
+    ID3D11ComputeShader* cs = nullptr;
+    ID3D11Buffer* cb[2] = {};
+    UINT cbFirst[2] = {}, cbNum[2] = {};
+    ID3D11UnorderedAccessView* uav[2] = {};
+    ctx->CSGetShader(&cs, nullptr, nullptr);
+    if (ctx1) ctx1->CSGetConstantBuffers1(0, 2, cb, cbFirst, cbNum);
+    else ctx->CSGetConstantBuffers(0, 2, cb);
+    ctx->CSGetUnorderedAccessViews(0, 2, uav);
+    const struct { float m; UINT n; UINT unused[2]; } param = { gameSharpenScale(pct), n, {} };
+    ctx->UpdateSubresource(g_gsParam, 0, nullptr, &param, 0, 0);
+    ctx->CSSetShader(g_gsCS, nullptr, 0);
+    if (ranged) ctx1->CSSetConstantBuffers1(0, 1, &game, &first, &num);
+    else ctx->CSSetConstantBuffers(0, 1, &game);
+    ctx->CSSetConstantBuffers(1, 1, &g_gsParam);
+    ID3D11UnorderedAccessView* ours[2] = { g_gsOutUAV, g_gsLogUAV };
+    ctx->CSSetUnorderedAccessViews(0, 2, ours, nullptr);
+    ctx->Dispatch((n + 63) / 64, 1, 1);
+    ctx->CSSetShader(cs, nullptr, 0);
+    if (ctx1) ctx1->CSSetConstantBuffers1(0, 2, cb, cbFirst, cbNum);
+    else ctx->CSSetConstantBuffers(0, 2, cb);
+    ctx->CSSetUnorderedAccessViews(0, 2, uav, nullptr);
+    if (cs) cs->Release();
+    for (auto* x : cb) if (x) x->Release();
+    for (auto* x : uav) if (x) x->Release();
+    if (sample) {
+        ctx->CopyResource(g_gsStage, g_gsLog);
+        unsigned all = 0;
+        for (unsigned d : g_gsDraws) all += d;
+        g_gs.rate = float(all - g_gs.drawsAtSample) / float(g_frame - g_gs.sampleFrame);  // at least 600 frames
+        g_gs.pending = true; g_gs.sampleFrame = g_frame; g_gs.drawsAtSample = all; g_gs.cbBytes = n * 16;
+        ID3D11RenderTargetView* rtv = nullptr;
+        ctx->OMGetRenderTargets(1, &rtv, nullptr);
+        if (rtv) {
+            ID3D11Resource* r = nullptr; rtv->GetResource(&r);
+            ID3D11Texture2D* t = nullptr;
+            if (r && SUCCEEDED(r->QueryInterface(__uuidof(ID3D11Texture2D), (void**)&t))) {
+                D3D11_TEXTURE2D_DESC td; t->GetDesc(&td); g_gs.w = td.Width; g_gs.h = td.Height; g_gs.fmt = td.Format; t->Release();
+            }
+            if (r) r->Release();
+            rtv->Release();
+        }
+    }
+    if (pct == 100) {  // a log sample only: the game's draw, nothing of ours bound
+        orig<PFN_Draw>(ctx, 13)(ctx, c, s);
+        game->Release();
+        return;
+    }
+    ctx->CopyResource(g_gsCB, g_gsOut);
+    ctx->PSSetConstantBuffers(0, 1, &g_gsCB);
+    orig<PFN_Draw>(ctx, 13)(ctx, c, s);
+    if (ranged) ctx1->PSSetConstantBuffers1(0, 1, &game, &first, &num);  // the game's buffer back, as it was bound
+    else ctx->PSSetConstantBuffers(0, 1, &game);
+    game->Release();
+}
+
 static void STDMETHODCALLTYPE hk_Draw(ID3D11DeviceContext* ctx, UINT c, UINT s) {
     if (ctx == g_imm) p12FirstDraw();
     noteUiDraw(ctx);
+    if (ctx == g_imm && g_immPS && g_immPS == g_gameSharpPS) {
+        gameSharpenDraw(ctx, c, s);
+        return;
+    }
     if (ctx == g_imm && g_immPS && g_immPS == g_taaPS) {
         void* ps = g_immPS;
+        gameSharpenAfterTaa();
         if (!dlssReplaceTaa(ctx)) orig<PFN_Draw>(ctx, 13)(ctx, c, s);
         g_immPS = ps;  // our own work may have gone through hk_PSSetShader
         dlssAfterTaa(ctx);
@@ -747,6 +980,7 @@ static void STDMETHODCALLTYPE hk_DrawIndexed(ID3D11DeviceContext* ctx, UINT c, U
     if (ctx == g_imm) p12FirstDraw();
     if (ctx == g_imm && !g_maskRTV && g_maskPS && g_immPS == g_maskPS) detectMask(ctx);
     noteUiDraw(ctx);
+    gameSharpenCount(ctx, 12);
     orig<PFN_DrawIndexed>(ctx, 12)(ctx, c, s, b);
 }
 
@@ -818,6 +1052,7 @@ static HRESULT STDMETHODCALLTYPE hk_CreatePS(ID3D11Device* d, const void* c, SIZ
     if (SUCCEEDED(hr) && o && *o) {
         registerShader(*o, c, l);
         if (l >= 20) { unsigned long long h; memcpy(&h, (const char*)c + 4, 8); makeFontPS(d, o_CreatePS, *o, h); makeHudPS(d, o_CreatePS, *o, h); }
+        gameSharpenMake(d, *o, c, l);
     }
     return hr;
 }
@@ -831,6 +1066,9 @@ static void hookDevice(ID3D11Device* dev, ID3D11DeviceContext* imm) {
     static std::once_flag once;
     std::call_once(once, [&] {
         g_device = dev; g_imm = imm;
+        wchar_t gs[16] = {};
+        GetPrivateProfileStringW(L"dlss", L"game_sharpening", L"", gs, _countof(gs), path(L"ffxv_dlss.ini").c_str());
+        g_gameSharpPct = gameSharpenIni(gs);
         void** dvt = *(void***)dev;
         MH_CreateHook(dvt[12], (void*)hk_CreateVS, (void**)&o_CreateVS);
         MH_CreateHook(dvt[15], (void*)hk_CreatePS, (void**)&o_CreatePS);
