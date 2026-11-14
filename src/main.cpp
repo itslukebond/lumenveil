@@ -448,8 +448,7 @@ static void gameSharpenMake(ID3D11Device* d, void* ps, const void* code, SIZE_T 
     if (len >= 20) memcpy(&h, (const char*)code + 4, 8);
     logf("game sharpening: shader %016llx recognised", h);
     g_gs.id = h;
-    wchar_t sys[MAX_PATH]; GetSystemDirectoryW(sys, MAX_PATH); wcscat_s(sys, L"\\d3dcompiler_47.dll");
-    auto compile = (pD3DCompile)GetProcAddress(LoadLibraryW(sys), "D3DCompile");
+    const pD3DCompile compile = shaderCompiler();
     ID3DBlob *bc = nullptr, *err = nullptr;
     HRESULT hr = compile ? compile(kGsHlsl, strlen(kGsHlsl), "ffxv_game_sharpen", nullptr, nullptr, "main", "cs_5_0",
                                    D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &bc, &err) : E_FAIL;

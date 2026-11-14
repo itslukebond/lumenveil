@@ -49,8 +49,9 @@ for name in sorted(os.listdir(src)):
         if re.search(r'\bD3DCompile\s*\(', code) or 'd3dcompiler_47' in code:
             problems.append(f'{name}:{n}: compiles or loads the compiler outside shaderCompiler(): {line.strip()}')
 
-# Every run-time compile: dlss.cpp's compute shaders, main.cpp's HUD and font shaders, menu.cpp's menu shaders.
-for name, want in (('dlss.cpp', 1), ('main.cpp', 2), ('menu.cpp', 1)):
+# Every run-time compile: dlss.cpp's compute shaders, main.cpp's HUD and font shaders and the game sharpening
+# shader, menu.cpp's menu shaders.
+for name, want in (('dlss.cpp', 1), ('main.cpp', 3), ('menu.cpp', 1)):
     text = read(name)
     if name == 'main.cpp' and sc is not None: text = text.replace(sc, '')
     got = len(re.findall(r'const pD3DCompile compile = shaderCompiler\(\);', text))
