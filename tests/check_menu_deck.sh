@@ -3,10 +3,11 @@
 # with the host compiler and runs it, then checks menu.cpp's structure: still three input hooks; the desktop scale line
 # unchanged; the Deck is detected from the adapter and SteamDeck and logged on its own line; the Layout setting is read
 # from [overlay] layout; the Deck fonts load only after the desktop's and only on a Deck or with Layout not Automatic;
-# the layout is picked when the menu opens and changed only by the Portable mode switch (applied in compose's open block
+# the layout is picked when the menu opens and changed only by the layout button (applied in compose's open block
 # before the controller is fed); compose draws the desktop menu when the Deck layout is not open and gives ImGui's
-# controller navigation back on that path; the desktop Portable mode row is shown on every machine, after Position;
-# the Deck menu saves through the desktop's setters and ini keys. Each source check must fail on a broken copy.
+# controller navigation back on that path; the layout button is in both layouts on every machine and saves to
+# [overlay] layout through one handler, and the Portable mode row is gone; both layouts take their rows from the page
+# model and save through the same helpers, setters and ini keys. Each source check must fail on a broken copy.
 # Usage: tests/check_menu_deck.sh [source folder holding menu_deck.h and menu.cpp] [Dear ImGui folder]
 #        (defaults: src next to tests; third_party/imgui next to tests, or $IMGUI)
 here=$(cd "$(dirname "$0")" && pwd)
@@ -62,36 +63,44 @@ def problems(src):
     # the layout is picked when the menu opens, never while it is open
     p = code(poll)
     if not re.search(r'g_open = true;\n\s*g_deckOpen = g_deck26 && deck::deckLayoutOn\(g_layout, g_isDeck\);', p): out.append('the layout is not picked when the menu opens')
-    if c.count('g_deckOpen = ') != 2: out.append('the layout is changed somewhere other than the open and the Portable mode change')
+    if c.count('g_deckOpen = ') != 2: out.append('the layout is changed somewhere other than the open and the layout button')
     k0 = code(comp)
     blk = k0.find('if (g_open) {')
     sw = k0.find('g_deckOpen = g_deck26 && g_swap.want == 1;')
-    if blk < 0 or sw < blk or sw > k0.find('pad::feedPad('): out.append('the Portable mode change is not applied in compose before the controller is fed')
+    if blk < 0 or sw < blk or sw > k0.find('pad::feedPad('): out.append('the layout change is not applied in compose before the controller is fed')
     # compose: controller navigation off only in the Deck layout and back on otherwise; the desktop menu otherwise
     k = code(comp)
     if not re.search(r'if \(g_open && g_deckOpen\) io\.ConfigFlags &= ~ImGuiConfigFlags_NavEnableGamepad;\n\s*else io\.ConfigFlags \|= ImGuiConfigFlags_NavEnableGamepad;', k):
         out.append('compose does not give the controller navigation back outside the Deck layout')
     if k.find('NavEnableGamepad') > k.find('ImGui::NewFrame();'): out.append('the navigation flag is set after NewFrame')
     if not re.search(r'if \(g_open\) \{ if \(g_deckOpen\) drawDeckMenu\(\); else drawMenu\(\); \}', k): out.append('compose does not draw the desktop menu outside the Deck layout')
-    # the desktop Portable mode row: on every machine, after Position, saved to [overlay] layout
+    # the layout button: in both layouts on every machine, the only thing that changes the layout while the menu is
+    # open, saved to [overlay] layout through one handler; the Portable mode row is gone
     m = code(menu)
-    row = re.search(r'\n    \{ *(?://[^\n]*)?\n((?:[^\n]*\n){1,4}?)    \}\n', m)
-    if not row or 'label("Portable mode");' not in row.group(1) or 'iniSet(L"overlay", L"layout", g_layout)' not in row.group(1) \
-            or 'g_isDeck || g_layout' in m:
-        out.append('the desktop Portable mode row is not shown on every machine')
-    elif row.start() < m.find('label("Position");'): out.append('the desktop Portable mode row is not after Position')
-    if m.count('label("Portable mode")') != 1: out.append('the desktop menu shows Portable mode outside its condition')
-    # the Deck menu saves as the desktop does: same setters, same ini keys and game setting
     d = code(deckm)
+    sl = body(src, 'switchLayout')
+    if sl is None or not re.search(r'g_layout = portable \? 1 : 2;\n\s*iniSet\(L"overlay", L"layout", g_layout\);\n\s*g_swap\.flip\(portable, ImGui::GetTime\(\), g_deckOpen\);', code(sl)):
+        out.append('the layout button does not save to [overlay] layout')
+    if not re.search(r'const int want = look::layoutButton\("##layout", false, g_deck26 != nullptr, [^\n]*\n(?:[^\n]*\n){1,2}\s*if \(want >= 0\) switchLayout\(want == 1\);', m) \
+            or 'g_isDeck || g_layout' in m:
+        out.append('the desktop layout button is not shown on every machine')
+    if not re.search(r'const int want = deck::layoutButton\(L, true, [^\n]*\n\s*if \(want >= 0\) switchLayout\(want == 1\);', d):
+        out.append('the Portable layout has no layout button')
+    if c.count('switchLayout(') != 3 or c.count('iniSet(L"overlay", L"layout"') != 1 or c.count('g_swap.flip(') != 1:
+        out.append('the layout changes somewhere other than the layout button')
+    if '"Portable mode"' in c or 'portableRow(' in c or 'look::portable(' in c: out.append('the Portable mode row is still there')
+    # both layouts take their rows from the page model and save through the same setters and ini keys
+    for f, name in ((m, 'desktop'), (d, 'Portable')):
+        if 'const pages::State st = fillState();' not in f or not re.search(r'pages::rows\((g_deskPage|nav\.page), st, rows, &sub\)', f):
+            out.append('the %s menu does not take its rows from the page model' % name)
+        for call in ('flipToggle(r.id)', 'setSlider(r.id, val)', 'stepList(r.id, st, '):
+            if call not in f: out.append('the %s menu does not save through %s' % (name, call))
+    shared = ''.join(code(body(src, n) or '') for n in ('pick', 'flipToggle', 'setSlider', 'saveFg', 'setScale', 'fillState'))
     for call in ('dlssSetUpscaler(', 'iniSet(L"dlss", L"upscaler"', 'dlssToggle()', 'dlssSetSharpness(', 'iniSet(L"dlss", L"sharpness"',
                  'L"RenderingResolutionRatio"', 'iniSet(L"fg", L"backend"', 'fgApply(fs)', 'iniSet(L"fg", L"enable"', 'iniSet(L"fg", L"limit"',
-                 'iniSet(L"overlay", L"enable"', 'iniSet(L"overlay", L"corner"', 'iniSet(L"overlay", L"layout"', 'scaleState()', 'fgPick()'):
-        if call not in d: out.append('the Deck menu does not save through ' + call)
-    for call in ('scaleState()', 'fgPick()'):
-        if call not in m: out.append('the desktop menu does not share ' + call)
-    # the Deck menu hides what the Deck cannot run
-    for hidden in ('dlssSetPreset(', '##reflex', '##antilag', 'Low latency'):
-        if hidden in d: out.append('the Deck menu shows ' + hidden)
+                 'iniSet(L"overlay", L"enable"', 'iniSet(L"overlay", L"corner"', 'scaleState()', 'fgPick()', 'iniSet(L"dlss", L"preset"',
+                 'iniSet(L"fg", L"reflex"', 'iniSet(L"fg", L"antilag"', 'iniSet(L"ui", L"sharp"', 'iniSet(L"dlss", L"game_sharpening"'):
+        if call not in shared: out.append('the menus do not save through ' + call)
     # the number box: B and Esc leave it before they close the menu
     if not re.search(r'g_padBusy = g_typing = ', d): out.append('the Deck menu does not hold B and Esc while typing')
     return out
@@ -114,11 +123,14 @@ broken = {
     'nav not given back': source.replace('else io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;', '', 1),
     'nav off always': source.replace('if (g_open && g_deckOpen) io.ConfigFlags &= ~ImGuiConfigFlags_NavEnableGamepad;', 'io.ConfigFlags &= ~ImGuiConfigFlags_NavEnableGamepad;', 1),
     'deck menu always': source.replace('if (g_open) { if (g_deckOpen) drawDeckMenu(); else drawMenu(); }', 'if (g_open) drawDeckMenu();', 1),
-    'portable row on a Deck only': source.replace(menu, menu.replace('    {  // every machine', '    if (g_isDeck || g_layout != 0) {  // every machine', 1), 1),
+    'desktop button on a Deck only': source.replace('look::layoutButton("##layout", false, g_deck26 != nullptr', 'look::layoutButton("##layout", false, g_isDeck && g_deck26 != nullptr', 1),
     'swap applied after feedPad': source.replace(body(source, 'compose'), body(source, 'compose').replace('        pad::feedPad(io, g_padView, g_padBusy);\n', '', 1).replace('        if (g_swap.due(', '        pad::feedPad(io, g_padView, g_padBusy);\n        if (g_swap.due(', 1), 1),
-    'portable row not saved': source.replace(menu, menu.replace('iniSet(L"overlay", L"layout", g_layout)', 'iniSet(L"overlay", L"layouts", g_layout)', 1), 1),
-    'deck own ratio': source.replace(body(source, 'drawDeckMenu'), body(source, 'drawDeckMenu').replace('scaleState()', 'ownScale()'), 1),
-    'deck shows reflex': source.replace(body(source, 'drawDeckMenu'), body(source, 'drawDeckMenu') + '    deck::status(L, "##reflex", deck::kDim);\n', 1),
+    'layout not saved': source.replace(body(source, 'switchLayout'), body(source, 'switchLayout').replace('iniSet(L"overlay", L"layout", g_layout)', 'iniSet(L"overlay", L"layouts", g_layout)', 1), 1),
+    'no button in Portable': source.replace(body(source, 'drawDeckMenu'), body(source, 'drawDeckMenu').replace('    if (want >= 0) switchLayout(want == 1);\n', '', 1), 1),
+    'deck own rows': source.replace(body(source, 'drawDeckMenu'), body(source, 'drawDeckMenu').replace('pages::rows(', 'deckRows('), 1),
+    'deck own toggle': source.replace(body(source, 'drawDeckMenu'), body(source, 'drawDeckMenu').replace('flipToggle(r.id)', 'dlssToggle()'), 1),
+    'helper drops a key': source.replace(body(source, 'flipToggle'), body(source, 'flipToggle').replace('iniSet(L"ui", L"sharp"', 'iniSet(L"ui", L"sharper"', 1), 1),
+    'Portable mode row back': source.replace(menu, menu + '    ImGui::TextUnformatted("Portable mode");\n', 1),
     'B closes while typing': source.replace('g_padBusy = g_typing = ', 'g_typing = ', 1),
 }
 for name, s in broken.items():

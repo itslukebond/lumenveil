@@ -34,14 +34,14 @@ def order(body, *marks):
         at = i
     return True
 
-# the interval and the Present (findings 1, 2)
+# the interval and the Present
 if not line('const UINT interval = vsyncInterval(si, g_wine, proxyFg());'): out.append('p12Present: interval not taken from vsyncInterval(si, g_wine, proxyFg())')
 real = [c for c in re.findall(r'g_sc->Present\(([^;]*)\);', present) if 'DXGI_PRESENT_TEST' not in c]
 if len(real) != 1: out.append('p12Present: expected one real Present on our swap chain, found %d' % len(real))
 elif not real[0].startswith('interval, si == 0 && g_tearing ? flags | DXGI_PRESENT_ALLOW_TEARING : flags'):
     out.append('p12Present: our Present is not (interval, tearing flag only when the game asked for interval 0)')
 if not order(present, 'const UINT interval = vsyncInterval(', 'g_sc->Present(interval,'): out.append('p12Present: interval decided after Present')
-# the cap stands in for VSync only where it was dropped; one limiter (finding 5)
+# the cap stands in for VSync only where it was dropped; one limiter
 if not line('g_wantSync = vsyncByCap(si, g_wine, proxyFg());'): out.append("p12Present: VSync-by-cap not recorded from vsyncByCap(si, g_wine, proxyFg())")
 if 'game asked for VSync' not in src: out.append('present12.cpp: no log line saying how VSync is honoured')
 for name, b in (('setReflex', reflex), ('fsrPace', pace)):
@@ -49,10 +49,10 @@ for name, b in (('setReflex', reflex), ('fsrPace', pace)):
     if not m or not re.search(r'\bcap\b', m.group(1)): out.append('%s: cap not taken from, or not using, vsyncCap(g_set.limit, g_autoCap, g_wantSync)' % name)
 if not line('if (ownPace(g_fg, proxyFg(), up, g_wantSync)) fsrPace();'): out.append('p12Present: our pacing is not routed by ownPace(g_fg, proxyFg(), up, g_wantSync)')
 if not re.search(r'g_wantSync = vsyncByCap\(.*?setReflex\(\).*?g_sc->Present\(interval,', present, re.S): out.append('p12Present: Reflex cap not refreshed when VSync changes')
-# the menu's cap row is usable whenever our pacing stands in for VSync (finding 4)
+# the menu's cap row is usable whenever our pacing stands in for VSync
 if not re.search(r's\.vsyncPaced\s*=\s*g_wantSync;', status): out.append('fgStatus: vsyncPaced not reported')
-if not re.search(r'BeginDisabled\(!st\.available && st\.backend < 0 && di\.active != 1 && di\.active != 2 && !st\.vsyncPaced\)', menu): out.append('menu.cpp: Frame cap row not enabled for VSync pacing')
-# the watchdog (finding 3, rare R1)
+if not re.search(r's\.capUsable = st\.available \|\| st\.backend >= 0 \|\| di\.active == 1 \|\| di\.active == 2 \|\| st\.vsyncPaced;', menu): out.append('menu.cpp: Frame cap row not enabled for VSync pacing')
+# the watchdog
 m = re.search(r'if \(!g_watchdog\) \{\s*g_watchdog = true;\s*if \(HANDLE th = CreateThread\(nullptr, 0, stallWatchdog', init)
 if not m: out.append('p12Init: stall watchdog not started exactly once')
 wd = bodies.get('stallWatchdog')

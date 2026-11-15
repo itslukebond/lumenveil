@@ -37,17 +37,17 @@ def problems(p, m):
     out, b = [], {k: code(v) for k, v in bodies(p).items()}
     init, present_, fail_ = b.get('p12Init'), b.get('p12Present'), b.get('fail')
     if None in (init, present_, fail_): return ['p12Init, p12Present or fail not found']
-    # AC1: its own key, off unless the ini says otherwise
+    # its own key, off unless the ini says otherwise
     if 'ini(L"fg", L"antilag", 0)' not in init: out.append('p12Init does not read [fg] antilag with default 0')
-    # AC4: the driver is asked only on an AMD card outside Wine, once, after the device exists
+    # the driver is asked only on an AMD card outside Wine, once, after the device exists
     if not re.search(r'g_vendor == 0x1002 && !g_wine \? AMD::AntiLag2DX12::Initialize\(&g_al2, g_d3d12\)', init):
         out.append('Anti-Lag 2 is initialised without the AMD-and-not-Wine check')
     if not order(init, 'D3D12CreateDevice(', 'Initialize(&g_al2'): out.append('Anti-Lag 2 is initialised before the D3D12 device exists')
     if [k for k, v in b.items() if re.search(r'(?<!De)Initialize\(&g_al2', v) and k != 'p12Init']: out.append('Anti-Lag 2 is initialised outside p12Init')
-    # AC7: released after FSR's thread and Intel's swap chain are gone, before the queue and device
+    # released after FSR's thread and Intel's swap chain are gone, before the queue and device
     if not order(fail_, 'fsrFgDestroy(', 'xessFgDestroy()', 'DeInitialize(&g_al2)', 'release(g_d3d12Queue)'):
         out.append('fail() releases Anti-Lag 2 out of order (after fsrFgDestroy and xessFgDestroy, before the queue and device)')
-    # AC2/AC5: decided after the menu (a change applies this frame); FSR is told before Present; the driver's sleep after pacing
+    # decided after the menu (a change applies this frame); FSR is told before Present; the driver's sleep after pacing
     if not order(present_, 'menuFrame(', 'al2Run('): out.append('p12Present decides Anti-Lag 2 before the menu has run')
     if not re.search(r'al2Run\(g_al2State, g_set\.antilag, g_fg, g_xessSc\)', present_):
         out.append('p12Present does not rule out DLSS and XeSS frame generation for Anti-Lag 2')
@@ -55,7 +55,7 @@ def problems(p, m):
     if not re.search(r'if \(g_fsrFg && al2\) AMD::AntiLag2DX12::MarkEndOfFrameRendering', present_):
         out.append('the end of the frame is marked without FSR frame generation and Anti-Lag 2 both on')
     if not order(present_, 'fsrPace()', 'Update(&g_al2'): out.append('Anti-Lag 2 is updated before the presenter paces the frame')
-    # AC6: off means no call per frame after the one that turns it off
+    # off means no call per frame after the one that turns it off
     if not re.search(r'if \(al2 \|\| g_al2\.m_enabled\) \{[^}]*Update\(&g_al2, al2, 0\)', present_):
         out.append('Anti-Lag 2 is updated every frame while off')
     # FSR's presenter reads the context through FidelityFX 2.4.0's private data GUID
@@ -64,7 +64,7 @@ def problems(p, m):
     if 'SetPrivateData(kFfxAntiLag2Data' not in present_: out.append('p12Present does not hand the context to FSR')
     # the menu saves its own key
     if 'iniSet(L"fg", L"antilag", fs.antilag);' not in code(m): out.append('the menu does not save [fg] antilag')
-    if not re.search(r'if \(al2MenuShown\(st\.antilag, st\.backend\)\)', code(m)): out.append('the menu does not show the section by al2MenuShown')
+    if not re.search(r's\.al2Shown = al2MenuShown\(st\.antilag, st\.backend\);', code(m)): out.append('the menu does not show the row by al2MenuShown')
     return out
 
 got = problems(present, menu)
@@ -84,7 +84,7 @@ broken = {
     'no end-of-frame mark': (present.replace('if (g_fsrFg && al2) AMD::AntiLag2DX12::MarkEndOfFrameRendering(&g_al2);', '', 1), menu),
     'mark without FSR': (present.replace('if (g_fsrFg && al2) AMD::AntiLag2DX12::MarkEndOfFrameRendering', 'if (al2) AMD::AntiLag2DX12::MarkEndOfFrameRendering', 1), menu),
     'FSR not told': (present.replace('g_sc->SetPrivateData(kFfxAntiLag2Data,', 'g_sc->GetDesc1(nullptr); (void)(kFfxAntiLag2Data,', 1), menu),
-    'menu shows it always': (present, menu.replace('if (al2MenuShown(st.antilag, st.backend))', 'if (true)', 1)),
+    'menu shows it always': (present, menu.replace('s.al2Shown = al2MenuShown(st.antilag, st.backend);', 's.al2Shown = true;', 1)),
     'XeSS not ruled out': (present.replace('al2Run(g_al2State, g_set.antilag, g_fg, g_xessSc)', 'al2Run(g_al2State, g_set.antilag, g_fg, false)', 1), menu),
     'update every frame': (present.replace('if (al2 || g_al2.m_enabled) {', 'if (true) {', 1), menu),
     'update before pacing': (present.replace(pb, pb.replace('fsrPace();', 'fsrPaceX();', 1).replace(

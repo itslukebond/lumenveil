@@ -164,15 +164,19 @@ the release) goes through it step by step, and shows how to install by hand if a
 ## Using the mod (Insert key)
 
 Press **Insert** at any time in game to open or close the mod's menu. Changes apply straight away unless the menu says
-otherwise, and they're saved to `ffxv_dlss.ini` next to the game. The arrow keys move between settings (up and down)
-and change them (left and right); Enter or Space opens a list, and a slider's value can also be typed into its box.
+otherwise, and they're saved to `ffxv_dlss.ini` next to the game. The settings are on three pages: Upscaling, Frame
+generation and Overlay. Click a tab to change page, or use L1 / R1 on a controller. The arrow keys move between settings (up and down) and change
+them (left and right); Enter or Space opens a list, and a slider's value can also be typed into its box. The box under
+the settings explains the one you're on.
 
 With a controller, hold both sticks in (L3 and R3) for half a second to open or close the menu. Use the D-pad or left
-stick to move, A to change a setting and B to close a list or the menu. On a Steam Deck this works without a keyboard.
+stick to move, A to change a setting, L1 and R1 to change page, and B to close a list or the menu. On a Steam Deck
+this works without a keyboard.
 
-On a Steam Deck the menu switches to a larger layout with three pages; L1 and R1 change page. To use the normal menu,
-for example on a TV, turn Portable mode off on the Overlay page. On another handheld, turn Portable mode on at the
-bottom of the normal menu. The menu switches at once.
+The button at the top right of the menu switches between two layouts: Desktop, the normal menu, and Portable, a larger
+layout with touch controls for handhelds. Until you pick one, the mod uses Portable on a Steam Deck and Desktop
+elsewhere. On another handheld, such as a ROG Ally or Legion Go, pick Portable; for a Steam Deck on a TV, pick Desktop.
+The menu switches at once and remembers your pick.
 
 <p align="center">
   <img src="docs/images/menu.png" alt="The mod's menu in game: DLSS at Performance, DLSS Frame Generation at 2x, Reflex on" width="420">
@@ -191,7 +195,6 @@ bottom of the normal menu. The menu switches at once.
 | **Frame cap** | Off, Auto or Custom. Auto caps just under your display's refresh rate, so G-Sync, FreeSync or Adaptive Sync stays engaged. Pair it with V-Sync on in your driver's control panel. |
 | **Sharper HUD** | On by default. Crisper HUD text, icons and title screen at 4K, at a small cost in frame rate. Untick it for a little more fps. |
 | **FPS counter** | Show or hide the counter and pick its corner. It shows the fps you see and the base fps the game renders, the frame time of each in milliseconds, and a graph of the last two seconds of frame times. |
-| **Portable mode** | On uses the larger Steam Deck layout; Off the normal menu. Until you flip it, the mod picks: on for a Steam Deck, off elsewhere. On another handheld, such as a ROG Ally or Legion Go, turn it on. The menu switches at once. |
 
 <p align="center">
   <img src="docs/images/fps-counter.png" alt="The fps counter: 222 fps shown, 111 rendered, frame generation 2x, RTX 5090, DLSS 310.9.16" width="420">

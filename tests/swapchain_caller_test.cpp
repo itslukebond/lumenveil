@@ -1,7 +1,7 @@
 // Host test for src/swapchain_caller.h: which swap chain creations Lumenveil takes as the game's. The immediate caller
 // being the game or ReShade is taken as before; another module in between (a DXGI wrapper such as OptiScaler loaded as
 // version.dll) is taken only when the game is reached within 8 frames through modules that are not ours, Streamline's
-// or the system's, and the swap chain looks like the game's window. Expected values are the spec's cases.
+// or the system's, and the swap chain looks like the game's window. Expected values are written-out cases.
 #include "swapchain_caller.h"
 #include <cstdio>
 #include <cstring>

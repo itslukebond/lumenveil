@@ -1,7 +1,7 @@
 // The desktop Insert menu's and the FPS counter's look, after FFXV's own menus: a near-black panel fading to the right
 // with a blue light streak along the top and thin corner brackets, section names in spaced capitals, a pointing glove
 // cursor on the selected row, options as ‹ value ›, square toggles that animate, hairline sliders with a diamond knob, and the
-// counter's frame time graph, and the Portable mode switch. Dear ImGui's own widgets keep focus, navigation, clicks, lists and typing; this draws
+// counter's frame time graph, and the layout button and page tabs. Dear ImGui's own widgets keep focus, navigation, clicks, lists and typing; this draws
 // around them. Free of Windows types so tests/menu_look_test.cpp covers it on the host. Sizes are in ctx().s units;
 // colours are sRGB and always go through ImGui::GetColorU32, so a disabled row fades with it.
 #pragma once
@@ -67,23 +67,6 @@ inline float toggleAge(ImGuiStorage& st, ImGuiID id, bool on, float now) {
 
 // The glove's sway at t seconds: 0 to 2 px and back every 1.1 s, eased at both turns.
 inline float bobX(double t) { return float(1 - std::cos(6.283185307179586 * t / 1.1)); }
-
-// The Portable mode switch's knob, 0 at the Off end to 1 at the On end, `age` seconds after a flip: it glides over
-// 0.15 s, eased at both ends.
-inline float knobAt(bool on, float age) {
-    const float t = std::clamp(age / 0.15f, 0.f, 1.f), e = t * t * (3 - 2 * t);
-    return on ? e : 1 - e;
-}
-// Seconds since switch `id` last flipped, kept in `st`. A switch not drawn on the frame before (the menu has just
-// opened, or the layout has just changed) reads as long ago, so it shows its state without gliding.
-inline float switchAge(ImGuiStorage& st, ImGuiID id, bool on, float now, int frame) {
-    const ImGuiID kv = ImHashData(&id, sizeof id, 0x5a11u), kt = ImHashData(&id, sizeof id, 0x5a12u), kf = ImHashData(&id, sizeof id, 0x5a13u);
-    const int seen = st.GetInt(kv, 0), want = on ? 2 : 1, last = st.GetInt(kf, -10);
-    st.SetInt(kf, frame);
-    if (!seen || last != frame - 1) { st.SetInt(kv, want); st.SetFloat(kt, now - kStill); return kStill; }
-    if (seen != want) { st.SetInt(kv, want); st.SetFloat(kt, now); }
-    return now - st.GetFloat(kt, now - kStill);
-}
 
 // The graph's vertical scale eased toward `want` with a 0.2 s time constant, the same whatever the frame rate.
 inline float easeScale(float top, float want, float dt) { return top + (want - top) * (1 - std::exp(-dt / 0.2f)); }
@@ -191,34 +174,6 @@ inline void glove(ImDrawList* dl, ImVec2 o, float unit) {
     dl->AddLine(ImVec2(o.x + 3.4f * unit, o.y + 9 * unit), ImVec2(o.x + 3.4f * unit, o.y + 16 * unit), col(rgba(0x9a, 0xa7, 0xb8, 1)), unit);
 }
 
-// The Portable mode switch's sizes in design pixels: the track (2 px corners), the knob (a square turned 45 degrees),
-// the knob centre's distance from the track's ends, the gap to the word and the word's fixed slot and text size.
-struct SwitchSize { float w, h, knob, end, gap, word; };
-constexpr SwitchSize kDeskSwitch{ 40, 18, 9, 9, 10, 28 }, kDeckSwitch{ 72, 32, 16, 15, 16, 60 };
-// The switch drawn with its track's left edge at x, centred on cy, at k screen pixels per design pixel; t is the knob's
-// place (knobAt). The track lights blue as the knob nears the On end. The word sits in its slot: nothing moves.
-inline void switchLook(ImDrawList* dl, float x, float cy, float k, const SwitchSize& z, bool on, float t, ImFont* f, float textPx) {
-    const ImVec2 a(x, std::floor(cy - z.h * 0.5f * k)), b(x + z.w * k, a.y + z.h * k);
-    const float r = 2 * k;
-    if (t > 0.001f) {  // the glow, faded in with the knob
-        for (int i = 3; i >= 1; --i)
-            dl->AddRect(ImVec2(a.x - i * k, a.y - i * k), ImVec2(b.x + i * k, b.y + i * k), col(rgba(79, 141, 255, 0.18f * t / i)), r + i * k, 0, k);
-    }
-    dl->AddRectFilled(a, b, col(rgba(255, 255, 255, .04f * (1 - t))), r);
-    if (t > 0.001f) {
-        const Stop lit[] = { { 0, rgba(79, 141, 255, .22f * t) }, { 1, rgba(79, 141, 255, .70f * t) } };
-        hgrad(dl, a.x + k, b.x - k, a.y + k, b.y - k, lit, 2);
-    }
-    const ImVec4 off = rgba(220, 230, 240, .7f), lit = rgba(0xcf, 0xe0, 0xff, 1);
-    const ImVec4 border(off.x + (lit.x - off.x) * t, off.y + (lit.y - off.y) * t, off.z + (lit.z - off.z) * t, off.w + (lit.w - off.w) * t);
-    dl->AddRect(a, b, col(border), r, 0, k);
-    const float kx = a.x + (z.end + (z.w - 2 * z.end) * t) * k, half = z.knob * 0.7071f * k;
-    const ImVec4 knobOff = rgba(0xb9, 0xc2, 0xcc, 1);
-    diamond(dl, ImVec2(kx, cy), half, ImVec4(knobOff.x + (1 - knobOff.x) * t, knobOff.y + (1 - knobOff.y) * t, knobOff.z + (1 - knobOff.z) * t, 1), t * 2 * k);
-    const char* word = on ? "On" : "Off";
-    dl->AddText(f, textPx, ImVec2(b.x + z.gap * k, cy - textPx * 0.5f), col(on ? kInk : kInk2), word);
-}
-
 // The panel: a near-black gradient fading to the right, the light streak with its glow along the top, and for the menu
 // a faint line along the bottom. Square corners.
 enum Kind { kMenu, kCounter };
@@ -320,7 +275,7 @@ inline void row() {
 // combo over the middle with the value centred (cut with an ellipsis when too long). Returns -1 or 1 on a click on an
 // arrow, or on left / right (keyboard or D-pad, once per press) while the combo has the focus and its list is closed,
 // else 0. *open is BeginCombo's answer: the caller lists the values, then calls ImGui::EndCombo.
-inline int optionFrame(const char* id, const char* value, bool* open) {
+inline int optionFrame(const char* id, const char* value, bool* open, const char* rest = nullptr) {
     const float s = ctx().s, a = 22 * s, w = ImGui::CalcItemWidth(), h = ImGui::GetFrameHeight();
     const ImVec2 p = ImGui::GetCursorScreenPos();
     const bool disabled = (GImGui->CurrentItemFlags & ImGuiItemFlags_Disabled) != 0;
@@ -340,11 +295,14 @@ inline int optionFrame(const char* id, const char* value, bool* open) {
     chevron(dl, ImVec2(p.x + w - a * 0.5f, p.y + h * 0.5f), 1, hotNext ? kWhite : dim);
     // the value, centred in the middle slot, drawn before the combo (whose own frame is transparent)
     const ImVec2 v0(p.x + a, p.y), v1(p.x + w - a, p.y + h);
-    const float pad = ImGui::GetStyle().FramePadding.x, tw = ImGui::CalcTextSize(value).x;
+    char tail[48] = "";
+    if (rest && *rest) std::snprintf(tail, sizeof tail, " \xC2\xB7 %s", rest);  // " · DLSS", dim
+    const float pad = ImGui::GetStyle().FramePadding.x, mw = ImGui::CalcTextSize(value).x, tw = mw + ImGui::CalcTextSize(tail).x;
     const float tx = std::max(v0.x + pad, (v0.x + v1.x - tw) * 0.5f), ty = p.y + ImGui::GetStyle().FramePadding.y;
     ImGui::PushStyleColor(ImGuiCol_Text, kInk);
     ImGui::RenderTextEllipsis(dl, ImVec2(tx, ty), ImVec2(v1.x - pad, v1.y), v1.x - pad, v1.x - pad, value, nullptr, nullptr);
     ImGui::PopStyleColor();
+    if (*tail) dl->AddText(ImVec2(tx + mw, ty), col(kDim), tail);
     ImGui::SetCursorScreenPos(v0);
     ImGui::SetNextItemWidth(v1.x - v0.x);
     *open = ImGui::BeginCombo(id, "", ImGuiComboFlags_NoArrowButton | ImGuiComboFlags_HeightLarge);
@@ -352,9 +310,9 @@ inline int optionFrame(const char* id, const char* value, bool* open) {
     return disabled ? 0 : d;
 }
 // ImGui::Combo's contract drawn as ‹ value ›: true when *cur changed (a pick from the list, or a step with wrap-around).
-inline bool option(const char* id, int* cur, const char* const items[], int n) {
+inline bool option(const char* id, int* cur, const char* const items[], int n, const char* shown = nullptr, const char* rest = nullptr) {
     bool open = false, changed = false;
-    const int d = optionFrame(id, *cur >= 0 && *cur < n ? items[*cur] : "", &open);
+    const int d = optionFrame(id, shown ? shown : *cur >= 0 && *cur < n ? items[*cur] : "", &open, rest);
     if (open) {
         for (int i = 0; i < n; ++i) {
             if (ImGui::Selectable(items[i], i == *cur) && i != *cur) { *cur = i; changed = true; }
@@ -393,22 +351,6 @@ inline void toggleLook(bool on) {
     dl->AddText(ImVec2(c.x + half + 10 * s, cy - ImGui::GetFontSize() * 0.5f), col(kInk2), word);
 }
 
-// The Portable mode switch: one navigable item over the track, the gap and the word's slot. A click on it, A, Space or
-// Enter while it has the focus flips `on`; left turns it off and right on. Disabled, it shows its state and takes
-// nothing. True when `on` changed.
-inline bool portable(const char* id, bool& on, bool enabled) {
-    const float s = ctx().s;
-    const SwitchSize& z = kDeskSwitch;
-    bool flipped = false;
-    ImGui::BeginDisabled(!enabled);
-    if (ImGui::InvisibleButton(id, ImVec2((z.w + z.gap + z.word) * s, ImGui::GetFrameHeight()), ImGuiButtonFlags_EnableNav)) { on = !on; flipped = true; }
-    if (enabled) flipped |= pad::padTick(on);
-    const ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
-    const float age = switchAge(*ImGui::GetStateStorage(), ImGui::GetItemID(), on, float(ImGui::GetTime()), ImGui::GetFrameCount());
-    switchLook(ImGui::GetWindowDrawList(), a.x, std::floor((a.y + b.y) * 0.5f), s, z, on, knobAt(on, age), ImGui::GetFont(), ImGui::GetFontSize());
-    ImGui::EndDisabled();
-    return flipped;
-}
 // Right after an item: it takes the keyboard and controller focus (without being pressed), with the nav cursor shown
 // when `cursor`, and is scrolled into view.
 inline void focusItem(bool cursor) {
@@ -420,8 +362,8 @@ inline void focusItem(bool cursor) {
     if (cursor) g.NavHighlightItemUnderNav = true;
     ImGui::ScrollToItem();
 }
-// Called right after the desktop Portable mode switch: when the desktop menu has just taken over from the Deck layout
-// (pending), the switch takes the focus, its nav cursor shown when a controller has been used (cursor).
+// Called right after the desktop layout button: when the desktop menu has just taken over from the Portable layout
+// (pending), the button takes the focus, its nav cursor shown when a controller has been used (cursor).
 inline void takeFocus(bool& pending, bool cursor) {
     if (!pending) return;
     pending = false;
@@ -479,6 +421,123 @@ inline float keyHint(ImDrawList* dl, float x, float y, float h, const char* badg
     x += bw + 6 * s;
     dl->AddText(f, f->FontSize, ImVec2(x, y + (h - f->FontSize) * 0.5f), col(kInk2), word);
     return x + f->CalcTextSizeA(f->FontSize, FLT_MAX, 0, word).x;
+}
+
+// Text wrapped at width w in font f at `size`, one line every `step`, at most maxLines lines (the rest is left out).
+// Returns the lines it needs, drawn or not; measures only when dl is null.
+inline int wrapText(ImDrawList* dl, ImFont* f, float size, ImVec2 p, float w, float step, const char* t, const ImVec4& c, int maxLines) {
+    const char* end = t + std::strlen(t);
+    int n = 0;
+    while (t < end) {
+        const char* brk = f->CalcWordWrapPositionA(size / f->FontSize, t, end, w);
+        if (brk == t) brk = t + 1;  // a word wider than the line: at least one character
+        if (dl && n < maxLines) dl->AddText(f, size, ImVec2(p.x, p.y + n * step), col(c), t, brk);
+        ++n;
+        t = brk;
+        while (t < end && (*t == ' ' || *t == '\n')) ++t;
+    }
+    return n;
+}
+
+// ---- the layout button and the page tabs (both layouts) ----------------------------------------------------------------
+// The two icons, drawn with the draw list in a box of height h at x (top y): a monitor on its stand, and a handheld with
+// its screen and two buttons. Returns the width used.
+inline float monitorIcon(ImDrawList* dl, float x, float y, float h, const ImVec4& c, float th) {
+    const float w = h * 1.25f, sh = h * 0.72f;
+    dl->AddRect(ImVec2(x, y), ImVec2(x + w, y + sh), col(c), 0, 0, th);
+    dl->AddLine(ImVec2(x + w * 0.5f, y + sh), ImVec2(x + w * 0.5f, y + h - th), col(c), th);
+    dl->AddLine(ImVec2(x + w * 0.25f, y + h - th * 0.5f), ImVec2(x + w * 0.75f, y + h - th * 0.5f), col(c), th);
+    return w;
+}
+inline float handheldIcon(ImDrawList* dl, float x, float y, float h, const ImVec4& c, float th) {
+    const float w = h * 1.6f, t = y + h * 0.18f, b = y + h * 0.82f;
+    dl->AddRect(ImVec2(x, t), ImVec2(x + w, b), col(c), 2 * th, 0, th);
+    dl->AddRect(ImVec2(x + w * 0.3f, t + h * 0.14f), ImVec2(x + w * 0.7f, b - h * 0.14f), col(c), 0, 0, th);
+    const float cy = (t + b) * 0.5f, r = std::max(1.0f, h * 0.07f);
+    dl->AddCircleFilled(ImVec2(x + w * 0.15f, cy), r, col(c));
+    dl->AddCircleFilled(ImVec2(x + w * 0.85f, cy), r, col(c));
+    return w;
+}
+// The two-part layout button in a..b: Desktop left, Portable right, square (2 px corners); the current layout's half lit
+// (the selection band, ink text and a 1 px #a9c8ff underline), the other dim. k: screen pixels per design pixel; f, px:
+// the words' font and size; focused: the keyboard or controller focus is on it (a brighter outline).
+inline void layoutLook(ImDrawList* dl, ImVec2 a, ImVec2 b, bool portable, bool focused, ImFont* f, float px, float k) {
+    const float mid = std::floor((a.x + b.x) * 0.5f), h = b.y - a.y, ih = std::round(h * 0.36f);
+    const ImVec4 edge = focused ? rgba(0xa9, 0xc8, 0xff, .9f) : rgba(205, 215, 228, .35f);
+    for (int i = 0; i < 2; ++i) {
+        const bool lit = (i == 1) == portable;
+        const float x0 = i ? mid : a.x, x1 = i ? b.x : mid;
+        if (lit) {
+            dl->AddRectFilled(ImVec2(x0, a.y), ImVec2(x1, b.y), col(kSel), 2 * k, i ? ImDrawFlags_RoundCornersRight : ImDrawFlags_RoundCornersLeft);
+            dl->AddRectFilled(ImVec2(x0, b.y - k), ImVec2(x1, b.y), col(rgba(0xa9, 0xc8, 0xff, 1)));
+        }
+        const ImVec4 c = lit ? kInk : kDim;
+        const char* word = i ? "Portable" : "Desktop";
+        const float th = std::max(1.0f, 1.2f * k), tw = f->CalcTextSizeA(px, FLT_MAX, 0, word).x;
+        const float iw = i ? ih * 1.6f : ih * 1.25f, gap = 8 * k, w = iw + gap + tw;
+        const float x = std::floor((x0 + x1 - w) * 0.5f), iy = std::floor(a.y + (h - ih) * 0.5f);
+        if (i) handheldIcon(dl, x, iy, ih, c, th); else monitorIcon(dl, x, iy, ih, c, th);
+        dl->AddText(f, px, ImVec2(x + iw + gap, std::floor(a.y + (h - px) * 0.5f)), col(c), word);
+    }
+    dl->AddRect(a, b, col(edge), 2 * k, 0, std::max(1.0f, k));
+    dl->AddRectFilled(ImVec2(mid, a.y + 4 * k), ImVec2(mid + std::max(1.0f, k), b.y - 4 * k), col(kRule));
+}
+// What a press or a key on the layout button asks for: the layout (0 Desktop, 1 Portable) to switch to, or -1 for
+// nothing. A press on a half picks it; left / right pick that side's half; A, Space or Enter (activate) picks the other
+// layout. Asking for the layout already shown is nothing.
+inline int layoutPick(bool portable, bool pressed, float pressX, float midX, int leftRight, bool activate) {
+    int want = -1;
+    if (pressed) want = pressX >= midX ? 1 : 0;
+    else if (leftRight) want = leftRight > 0 ? 1 : 0;
+    else if (activate) want = portable ? 0 : 1;
+    return want == int(portable) ? -1 : want;
+}
+// The desktop menu's layout button at the cursor, size w x h: one navigable item over both halves (so Up from the first
+// row lands on it), clicked by the mouse, A, Space or Enter; left / right while it has the focus pick a half. Returns
+// the layout to switch to, or -1.
+inline int layoutButton(const char* id, bool portable, bool enabled, float w, float h) {
+    ImGui::BeginDisabled(!enabled);
+    const ImVec2 a = ImGui::GetCursorScreenPos(), b(a.x + w, a.y + h);
+    const bool clicked = ImGui::InvisibleButton(id, ImVec2(w, h), ImGuiButtonFlags_EnableNav);
+    const bool mouse = clicked && ImGui::IsMouseReleased(ImGuiMouseButton_Left);  // a click, not A / Space / Enter
+    const bool focused = ImGui::IsItemFocused() && GImGui->NavCursorVisible;
+    const int lr = enabled && ImGui::IsItemFocused() ? pad::padLeftRight(false) : 0;
+    layoutLook(ImGui::GetWindowDrawList(), a, b, portable, focused, ImGui::GetFont(), ImGui::GetFontSize(), ctx().s);
+    ImGui::EndDisabled();
+    if (!enabled) return -1;
+    return layoutPick(portable, mouse, ImGui::GetIO().MousePos.x, std::floor((a.x + b.x) * 0.5f), lr, clicked && !mouse);
+}
+// The desktop menu's page tabs across w from the cursor, h high: the names in spaced capitals, the current one in ink
+// with a short static underline. Never navigation stops (a click or L1 / R1 turns pages). Returns the page to
+// show: a clicked tab's, else page.
+inline int tabs(int page, const char* const* names, int n, float w, float h) {
+    const float s = ctx().s;
+    const ImVec2 p = ImGui::GetCursorScreenPos();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImFont* f = smallFont();
+    const float size = 12 * s, cw = w / n;
+    int to = page;
+    ImGui::PushItemFlag(ImGuiItemFlags_NoNav, true);
+    for (int i = 0; i < n; ++i) {
+        const float x0 = p.x + cw * i;
+        ImGui::SetCursorScreenPos(ImVec2(x0, p.y));
+        ImGui::PushID(i);
+        if (ImGui::InvisibleButton("##tab", ImVec2(cw, h), ImGuiButtonFlags_PressedOnClick | ImGuiButtonFlags_NoNavFocus)) to = i;
+        const bool hot = ImGui::IsItemHovered();
+        ImGui::PopID();
+        char up[48]; size_t k = 0;
+        for (; names[i][k] && k + 1 < sizeof up; ++k) up[k] = names[i][k] >= 'a' && names[i][k] <= 'z' ? char(names[i][k] - 32) : names[i][k];
+        up[k] = 0;
+        const float tw = spacedText(nullptr, f, size, ImVec2(0, 0), up, 0.2f, kInk);
+        const float tx = std::floor(x0 + (cw - tw) * 0.5f), ty = std::floor(p.y + (h - size) * 0.5f - 2 * s);
+        spacedText(dl, f, size, ImVec2(tx, ty), up, 0.2f, i == page ? kInk : hot ? kInk2 : kDim);
+        if (i == page) dl->AddRectFilled(ImVec2(tx, p.y + h - 2 * s), ImVec2(tx + tw, p.y + h), col(rgba(0xa9, 0xc8, 0xff, 1)));
+    }
+    ImGui::PopItemFlag();
+    dl->AddRectFilled(ImVec2(p.x, p.y + h), ImVec2(p.x + w, p.y + h + s), col(rgba(205, 215, 228, .12f)));
+    ImGui::SetCursorScreenPos(ImVec2(p.x, p.y + h + s));
+    ImGui::Dummy(ImVec2(w, 0));
+    return to;
 }
 
 }  // namespace look

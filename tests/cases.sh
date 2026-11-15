@@ -1955,7 +1955,7 @@ case_t18() {
     t "T18 guide has the XeSS tested-only note" eval 'flat "$R/INSTALL.md" | grep -qF -- "$XESS_TESTED"'
     t "T18 README has the XeSS tested-only note" eval 'flat "$R/README.md" | grep -qF -- "$XESS_TESTED"'
     t "T18 README has the Intel download" has_in "$R/README.md" "$XESS_URL"
-    t "T18 menu has the XeSS tested-only note" has_in "$R/src/menu.cpp" "$XESS_TESTED"
+    t "T18 menu has the XeSS tested-only note" has_in "$R/src/menu_pages.h" "$XESS_TESTED"
     t "T18 notices: Intel XeSS SDK row" grep -q '^| Intel XeSS SDK 3.0.2 |' "$R/THIRD_PARTY_NOTICES.md"
     t "T18 notices: Intel's licence named and linked" eval 'flat "$R/THIRD_PARTY_NOTICES.md" | grep -qF "Intel Simplified Software License" && grep -qF "https://github.com/intel/xess/blob/v3.0.2/LICENSE.txt" "$R/THIRD_PARTY_NOTICES.md"'
     t "T18 notices: Intel's DLLs are not part of the project" eval 'flat "$R/THIRD_PARTY_NOTICES.md" | grep -qF "Intel'"'"'s runtime DLLs"'
@@ -1977,6 +1977,7 @@ sys.exit(0 if "```\n" + "\n".join(block) + "\n```" in text else 1)' "$R/third_pa
         grep -oE "(Say|Write-Step|Write-Note|Read-Answer|Write-Fail)[A-Za-z-]* +['\"].*" "$R/scripts/setup.ps1"
         grep -i 'echo' "$R/install.bat" "$R/uninstall.bat" "$R/update.bat" "$R/undo-update.bat"
         grep -oE '"([^"\\]|\\.)*"' "$R/src/menu.cpp"
+        grep -oE '"([^"\\]|\\.)*"' "$R/src/menu_pages.h"
     } > "$T/player-text.txt"
     OUT=$T/player-text.txt
     t "T18 player text collected" test "$(wc -l < "$OUT")" -gt 100

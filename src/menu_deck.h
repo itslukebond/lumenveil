@@ -1,8 +1,8 @@
 // The Insert menu's Steam Deck layout, kept free of Windows types so tests/menu_deck_test.cpp covers it on the host:
 // detection, the Layout setting and its live change (Portable mode), the controller's steps and focus, and the widgets.
-// The layout is the signed-off 1280x800 design (a 760x768 panel: logo, tab bar with L1 / R1, one page of 66 px rows,
-// footer), drawn at min(width / 1280, height / 800) and centred, in the desktop menu's look (menu_look.h) at its own
-// sizes. Each row is one invisible button with a fixed rect drawn through the draw list, so rows never move, and a
+// The layout is a 1280x800 design (a 760x768 panel: logo and layout button, tab bar with L1 / R1, one page
+// of rows in fixed slots, the help box, the status line, footer), drawn at min(width / 1280, height / 800) and centred,
+// in the desktop menu's look (menu_look.h) at its own sizes. Each row is one invisible button with a fixed rect drawn through the draw list, so rows never move, and a
 // dimmed row keeps its place but takes no input.
 #pragma once
 #include <algorithm>
@@ -12,7 +12,7 @@
 #include <cstring>
 #include "imgui.h"
 #include "imgui_internal.h"  // ImRect, ClearActiveID
-#include "menu_look.h"       // the desktop look: panel, brackets, glove, tick box and switch animation
+#include "menu_look.h"       // the desktop look: panel, brackets, glove, tick box, layout button
 #include "menu_pad.h"        // typedValue
 
 namespace deck {
@@ -33,16 +33,15 @@ inline int layoutValue(int raw) { return raw == 1 || raw == 2 ? raw : 0; }
 inline bool deckLayoutOn(int setting, bool deck) { return setting == 1 ? true : setting == 2 ? false : deck; }
 inline float deckScale(float w, float h) { return std::min(w / 1280.f, h / 800.f); }
 
-// A layout change asked by the Portable mode switch: it lands 0.38 s after the flip (the knob finishes gliding first);
-// flipping back before then cancels it. want: -1 nothing pending, else 1 (the Deck layout) or 0 (the desktop menu).
+// A layout change asked by the layout button: it lands on the next frame (compose applies it before drawing); asking
+// for the layout shown cancels it. want: -1 nothing pending, else 1 (the Deck layout) or 0 (the desktop menu).
 struct Swap {
     int want = -1;
     double at = 0;
-    void flip(bool on, double now, bool current) {
+    void flip(bool on, double now, bool current, double delay = 0) {
         if (on == current) { want = -1; return; }
-        want = on ? 1 : 0; at = now + 0.38;
+        want = on ? 1 : 0; at = now + delay;
     }
-    bool shown(bool current) const { return want < 0 ? current : want == 1; }  // the switch's state on screen
     bool due(double now) const { return want >= 0 && now >= at; }
 };
 
@@ -59,25 +58,36 @@ inline int listStep(const int* values, int n, int cur, int dir) {
     return dir > 0 ? values[0] : values[n - 1];
 }
 
-// The focused row of each of the three pages, and the page shown.
+// The focused row of each of the three pages (-1: the layout button above the first row), and the page shown.
+constexpr int kButton = -1;
 struct Nav {
     int page = 0, focus[3] = {};
-    void move(int rows, int dir) { focus[page] = std::clamp(focus[page] + dir, 0, std::max(0, rows - 1)); }  // dimmed rows included
-    void turn(int dir) { page = wrapStep(page, 3, dir); }
+    void move(int rows, int dir) { focus[page] = std::clamp(focus[page] + dir, kButton, std::max(0, rows - 1)); }  // dimmed rows included
+    void turn(int dir) { page = wrapStep(page, 3, dir); focus[page] = 0; }  // a new page starts on its first row
+    void show(int to) { if (to != page) { page = to; focus[page] = 0; } }
 };
-constexpr int kRows[3] = { 4, 5, 3 };  // focusable rows on Upscaling, Frame generation and Overlay
-// Where a Portable mode change lands, once compose has set the new layout: the Deck layout opens on its Overlay page
-// with Portable mode (its third row) focused; the desktop menu is told to focus its switch (focusDesk).
+// Where a layout change lands, once compose has set the new layout: the Deck layout keeps its page with the layout
+// button focused; the desktop menu is told to focus its button (focusDesk).
 inline void landFocus(bool deckOpen, Nav& nav, bool& focusDesk) {
-    if (deckOpen) { nav.page = 2; nav.focus[2] = 2; }
+    if (deckOpen) nav.focus[nav.page] = kButton;
     else focusDesk = true;
 }
 
 // ---- drawing ---------------------------------------------------------------------------------------------------------
 // The design's geometry, in its pixels from the panel's top left.
+// Fixed slots, top to bottom: the top bar (logo left, layout button right), the tabs, the rows (a heading slot and seven
+// rows at a 54 px pitch), the help box (a hairline, three 26 px lines), the status line and the footer (key hints with
+// the version, two trademark lines). Nothing moves between pages or states.
 constexpr float kPanelW = 760, kPanelH = 768;
-constexpr float kTabTop = 84, kTabBottom = 140, kBodyTop = 140, kFootTop = 636;
-constexpr float kRowL = 20, kRowR = 740, kRowH = 66, kCtlL = 310, kCtlR = 728, kArrowW = 56, kBoxW = 104, kTrackR = 610;
+constexpr float kTopBar = 80, kButtonL = 430, kButtonR = 730, kButtonT = 18, kButtonB = 62;
+constexpr float kTabTop = 80, kTabBottom = 132, kBodyTop = 136, kSubH = 28, kPitch = 54, kBodyEnd = kBodyTop + kSubH + 7 * kPitch;
+constexpr float kHelpRule = 548, kHelpTop = 556, kHelpLine = 26, kHelpPx = 19, kStatusTop = 640, kStatusPx = 15;
+constexpr float kFootTop = 674, kTradeTop = 716, kTradePx = 15, kBottomPad = 18;
+constexpr float kLabelShrink = 0.95f;  // a row label longer than its slot is drawn up to 5% smaller before it is shortened
+constexpr float kRowL = 20, kRowR = 740, kRowH = kPitch - 2, kCtlL = 310, kCtlR = 722, kArrowW = 56, kBoxW = 104, kTrackR = 604;
+constexpr float kFlagX = 731;  // the flag slot's centre, right of the controls
+static_assert(kBodyEnd <= kHelpRule - 6 && kHelpTop + 3 * kHelpLine <= kStatusTop && kStatusTop + 26 <= kFootTop &&
+              kTradeTop + 2 * 17 + kBottomPad <= kPanelH, "the slots fit the panel in order");
 
 const ImVec4 kText(0.918f, 0.929f, 0.949f, 1), kDim(0.549f, 0.580f, 0.631f, 1), kGreen(0.620f, 0.902f, 0.200f, 1),
              kAmber(1.0f, 0.75f, 0.25f, 1);
@@ -102,12 +112,16 @@ struct Look {
 
 inline ImU32 col(const ImVec4& c, float a = 1) { return ImGui::GetColorU32(ImVec4(c.x, c.y, c.z, c.w * a)); }  // style alpha applies
 
-// Text in font f at px design pixels, shortened with "..." to fit maxW design pixels; align 0 left, 0.5 centred.
-inline void text(const Look& L, ImFont* f, float px, float x, float y, float maxW, const ImVec4& c, const char* s, float align = 0) {
-    const float size = px * L.k, max = maxW * L.k;
+// Text in font f at px design pixels, first made smaller (down to shrink times px) and then shortened with "..." to fit
+// maxW design pixels; align 0 left, 0.5 centred. A smaller size stays centred on the same line.
+inline void text(const Look& L, ImFont* f, float px, float x, float y, float maxW, const ImVec4& c, const char* s, float align = 0,
+                 float shrink = 1) {
+    const float full = px * L.k, max = maxW * L.k;
     char buf[256];
     std::snprintf(buf, sizeof buf, "%s", s);
-    float w = f->CalcTextSizeA(size, FLT_MAX, 0, buf).x;
+    float w = f->CalcTextSizeA(full, FLT_MAX, 0, buf).x;
+    const float size = w > max ? std::max(full * shrink, full * max / w) : full;
+    w = f->CalcTextSizeA(size, FLT_MAX, 0, buf).x;
     if (w > max) {
         size_t n = std::strlen(buf);
         while (n > 0 && w > max) {
@@ -117,7 +131,7 @@ inline void text(const Look& L, ImFont* f, float px, float x, float y, float max
         }
     }
     const ImVec2 at = L.p(x, y);
-    ImGui::GetWindowDrawList()->AddText(f, size, ImVec2(at.x + (max - w) * align, at.y), col(c), buf);
+    ImGui::GetWindowDrawList()->AddText(f, size, ImVec2(at.x + (max - w) * align, at.y + (full - size) * 0.5f), col(c), buf);
 }
 // A triangle pointing left (dir -1) or right (1), centred in the box.
 inline void arrow(const Look& L, float x0, float y0, float x1, float y1, int dir, const ImVec4& c) {
@@ -159,10 +173,19 @@ inline void end(Look& L) {
     ImGui::PopStyleVar(4);
 }
 
-// The logo, 58 design pixels tall, centred, 20 below the panel's top.
+// The logo, 48 design pixels tall, at the top bar's left.
 inline void logo(const Look& L, ImTextureID tex, float aspect) {
-    const float h = 58, w = h * aspect;
-    ImGui::GetWindowDrawList()->AddImage(tex, L.p((kPanelW - w) * 0.5f, 20), L.p((kPanelW + w) * 0.5f, 20 + h));
+    const float h = 48, w = h * aspect;
+    ImGui::GetWindowDrawList()->AddImage(tex, L.p(30, (kTopBar - h) * 0.5f), L.p(30 + w, (kTopBar + h) * 0.5f));
+}
+// The layout button at the top bar's right: a tap on a half picks it; with the controller's focus on it (focused),
+// left / right pick a half and A the other layout. Returns the layout to switch to (0 Desktop, 1 Portable) or -1.
+inline int layoutButton(const Look& L, bool portable, bool focused, int lr, bool a) {
+    ImGui::SetCursorScreenPos(L.p(kButtonL, kButtonT));
+    const bool pressed = ImGui::InvisibleButton("##layout", ImVec2((kButtonR - kButtonL) * L.k, (kButtonB - kButtonT) * L.k), ImGuiButtonFlags_PressedOnClick);
+    look::layoutLook(ImGui::GetWindowDrawList(), L.p(kButtonL, kButtonT), L.p(kButtonR, kButtonB), portable, focused, L.value, 22 * L.k, L.k);
+    return look::layoutPick(portable, pressed, ImGui::GetIO().MouseClickedPos[0].x, L.p((kButtonL + kButtonR) * 0.5f, 0).x,
+                            focused ? lr : 0, focused && a);
 }
 
 // Spaced capitals: text upper-cased with extra space after each letter, in font f at px design pixels; returns the width
@@ -226,30 +249,24 @@ inline int tabs(const Look& L, int page, const char* const* names) {
     return to;
 }
 
-// A heading in the body: 16 px spaced capitals in a 22 px line, 14 above (8 at the top of the page) and 6 below, then a
-// rule fading out toward the right.
-inline void section(Look& L, const char* name) {
-    L.y += L.y <= kBodyTop ? 8 : 14;
+// The heading in the rows' heading slot: 16 px spaced capitals at the slot's foot, then a rule fading out toward the
+// right; takes the slot's 28 px.
+inline void subHeading(Look& L, const char* name) {
     ImDrawList* dl = ImGui::GetWindowDrawList();
-    const float w = caps(L, dl, L.caption, 16, 30, L.y + (22 - 16) * 0.5f - 1, name, 0.22f, look::kInk2);
-    look::fadeRule(dl, L.p(30 + w + 12, 0).x, L.p(kPanelW - 30, 0).x, std::floor(L.p(0, L.y + 11).y), look::kRule, std::max(1.0f, L.k));
-    L.y += 22 + 6;
+    const float w = caps(L, dl, L.caption, 16, 30, L.y + kSubH - 16 - 6, name, 0.22f, look::kInk2);
+    look::fadeRule(dl, L.p(30 + w + 12, 0).x, L.p(kPanelW - 30, 0).x, std::floor(L.p(0, L.y + kSubH - 14).y), look::kRule, std::max(1.0f, L.k));
+    L.y += kSubH;
 }
-// One line under a row, 28 high, 48 px into the row, shortened to fit the panel's padding.
-inline void status(Look& L, const char* s, const ImVec4& c) {
-    L.y -= 2;
-    // a line a little too long for the font at 19 px is set smaller, down to 17 px, before it is shortened
-    const float maxW = kPanelW - 30 - (kRowL + 48), w = L.caption->CalcTextSizeA(19 * L.k, FLT_MAX, 0, s).x / L.k;
-    const float px = w > maxW ? std::max(17.f, std::floor(190 * maxW / w) / 10) : 19;
-    text(L, L.caption, px, kRowL + 48, L.y + (28 - px) * 0.5f - 1, maxW, c, s);
-    L.y += 28 + 4;
+// A row's flag in its slot at the right end: a small diamond, amber or green.
+inline void flag(const Look& L, float rowY, const ImVec4& c) {
+    look::diamond(ImGui::GetWindowDrawList(), L.p(kFlagX, rowY + kRowH * 0.5f), 5 * L.k, c, 0);
 }
 
 // A row's input: whether the controller's focus is on it, whether it is dimmed, and this frame's controller action
 // (left / right -1 / +1, A), given only to the focused row. Its output: a press on it (focus it) and the step asked
 // (-1 / +1; for a toggle, +1 flips it).
 struct RowIn { bool focused = false, dim = false; int lr = 0; bool a = false; };
-struct RowOut { bool press = false; int step = 0; };
+struct RowOut { bool press = false; int step = 0; bool focus = false; };  // focus: a tap on a dimmed row
 
 // The row's background, focus bar and label; the row's button is added by rowButton after the row's own controls.
 // The focused row: the desktop's blue band fading to the right, its glowing underline (to 85 % of the row) and the
@@ -269,7 +286,7 @@ inline void rowFrame(const Look& L, const char* label, const RowIn& in) {
         look::fadeRule(dl, a.x, ux, uy, look::rgba(0xa9, 0xc8, 0xff, 1), k);
         look::glove(dl, L.p(kRowL + 2 + look::ctx().bob, y + kRowH * 0.5f - 10.8f), 0.9f * k);
     }
-    text(L, L.label, 26, kRowL + 48, y + (kRowH - 26) * 0.5f - 1, kCtlL - kRowL - 52, look::kInk, label);
+    text(L, L.label, 26, kRowL + 48, y + (kRowH - 26) * 0.5f - 1, kCtlL - kRowL - 52, look::kInk, label, 0, kLabelShrink);
 }
 // The whole row as one button (last, so the row's own controls take a press first). True on the frame it is pressed;
 // the item is the row, so GetItemRect gives the row's rect.
@@ -277,11 +294,18 @@ inline bool rowButton(const Look& L, const char* id) {
     ImGui::SetCursorScreenPos(L.p(kRowL, L.y));
     return ImGui::InvisibleButton(id, ImVec2((kRowR - kRowL) * L.k, kRowH * L.k), ImGuiButtonFlags_PressedOnClick);
 }
+// A tap on a dimmed row (whose controls are disabled) only focuses it, so the help box can say why it is dimmed.
+inline bool dimTap(const Look& L) {
+    const ImVec2 m = ImGui::GetIO().MousePos;
+    const float x = L.dx(m.x), y = L.dy(m.y);
+    return ImGui::IsMouseClicked(0) && ImGui::IsWindowHovered() && x >= kRowL && x < kRowR && y >= L.y && y < L.y + kRowH;
+}
 // Where the press that is still held began, in design pixels.
 inline ImVec2 pressAt(const Look& L) { const ImVec2 m = ImGui::GetIO().MouseClickedPos[0]; return ImVec2(L.dx(m.x), L.dy(m.y)); }
 
-// ◀ value ▶: the arrows step -1 / +1, a press elsewhere on the row +1; left / right step, A steps +1.
-inline RowOut cycler(Look& L, const char* id, const char* label, const char* value, RowIn in) {
+// ◀ value ▶: the arrows step -1 / +1, a press elsewhere on the row +1; left / right step, A steps +1. A resolved part
+// (rest) follows the value dim after a dot.
+inline RowOut cycler(Look& L, const char* id, const char* label, const char* value, RowIn in, const char* rest = nullptr) {
     RowOut out;
     ImGui::BeginDisabled(in.dim);
     rowFrame(L, label, in);
@@ -291,13 +315,21 @@ inline RowOut cycler(Look& L, const char* id, const char* label, const char* val
     const ImVec4 ar = in.focused ? look::kWhite : look::kDim;
     look::chevron(dl, L.p(kCtlL + kArrowW * 0.5f, y + kRowH * 0.5f), -1, ar, 1.75f * L.k);
     look::chevron(dl, L.p(kCtlR - kArrowW * 0.5f, y + kRowH * 0.5f), 1, ar, 1.75f * L.k);
-    text(L, L.value, 24, kCtlL + kArrowW + 6, y + (kRowH - 24) * 0.5f - 1, kCtlR - kCtlL - 2 * kArrowW - 12, look::kInk, value, 0.5f);
+    {
+        char tail[48] = "";
+        if (rest && *rest) std::snprintf(tail, sizeof tail, " \xC2\xB7 %s", rest);
+        const float slot = kCtlR - kCtlL - 2 * kArrowW, mw = L.value->CalcTextSizeA(24 * L.k, FLT_MAX, 0, value).x / L.k,
+                    tw = L.value->CalcTextSizeA(24 * L.k, FLT_MAX, 0, tail).x / L.k, x = kCtlL + kArrowW + std::max(0.f, (slot - mw - tw) * 0.5f);
+        text(L, L.value, 24, x, y + (kRowH - 24) * 0.5f - 1, slot - (x - kCtlL - kArrowW), look::kInk, value);
+        if (*tail) text(L, L.value, 24, x + mw, y + (kRowH - 24) * 0.5f - 1, std::max(0.f, slot - (x + mw - kCtlL - kArrowW)), kDim, tail);
+    }
     if (rowButton(L, id)) {
         out.press = true;
         const ImVec2 at = pressAt(L);
         out.step = inside(at.x, at.y, kCtlL, t, kCtlL + kArrowW, t + 52) ? -1 : 1;
     }
     ImGui::EndDisabled();
+    if (in.dim && dimTap(L)) out.focus = true;
     if (!in.dim && in.focused && !out.press) out.step = in.lr ? in.lr : in.a ? 1 : 0;
     L.y += kRowH + 2;
     return out;
@@ -331,22 +363,7 @@ inline RowOut toggle(Look& L, const char* id, const char* label, bool on, RowIn 
     text(L, L.value, 22, kCtlL + 28 + 16, y + (kRowH - 22) * 0.5f - 1, 60, look::kInk2, on ? "On" : "Off");
     if (rowButton(L, id)) { out.press = true; out.step = 1; }
     ImGui::EndDisabled();
-    if (!in.dim && in.focused && !out.press && (in.lr || in.a)) out.step = 1;
-    L.y += kRowH + 2;
-    return out;
-}
-
-// The Portable mode switch (72 x 32 track, 16 px knob, the word in a 60 px slot at 22 px), with a tick box's input:
-// a press on the row, left / right or A flips it (step +1).
-inline RowOut portableRow(Look& L, const char* id, const char* label, bool on, RowIn in) {
-    RowOut out;
-    ImGui::BeginDisabled(in.dim);
-    rowFrame(L, label, in);
-    const float age = look::switchAge(*ImGui::GetStateStorage(), ImGui::GetID(id), on, float(ImGui::GetTime()), ImGui::GetFrameCount());
-    look::switchLook(ImGui::GetWindowDrawList(), L.p(kCtlL, 0).x, std::floor(L.p(0, L.y + kRowH * 0.5f).y), L.k, look::kDeckSwitch, on,
-                     look::knobAt(on, age), L.value, 22 * L.k);
-    if (rowButton(L, id)) { out.press = true; out.step = 1; }
-    ImGui::EndDisabled();
+    if (in.dim && dimTap(L)) out.focus = true;
     if (!in.dim && in.focused && !out.press && (in.lr || in.a)) out.step = 1;
     L.y += kRowH + 2;
     return out;
@@ -432,6 +449,7 @@ inline bool slider(Look& L, const char* id, const char* label, int& v, int lo, i
         else if (ImGui::IsItemActivated()) typing = Typing{ rid, true, false, 0 };  // a press on the label does what A does
     }
     ImGui::EndDisabled();
+    if (in.dim && dimTap(L)) out.focus = true;
     if (!in.dim && in.focused && typing.id != rid) {
         if (in.lr) v = clampStep(v, lo, hi, step, in.lr);
         else if (in.a) typing = Typing{ rid, true, false, 0 };
@@ -442,25 +460,25 @@ inline bool slider(Look& L, const char* id, const char* label, int& v, int lo, i
     return v != before;
 }
 
-// The footer, upward from the panel's 34 px bottom padding: a faint rule at kFootTop; the controller's buttons in square
-// badges with what they do; "Touch works too. Changes apply and save immediately." with `version` right-aligned on that
-// line; then 8 px lower the trademark line at 15 px.
-inline void footer(const Look& L, const char* version) {
+// The footer: a faint rule at kFootTop; the controller's buttons in square badges with what they do (B says Back while a
+// number box is being typed in), the version right-aligned on that line; then the trademark lines at 15 px.
+inline void footer(const Look& L, const char* version, bool typing) {
     ImDrawList* dl = ImGui::GetWindowDrawList();
     dl->AddRectFilled(L.p(30, kFootTop), L.p(kPanelW - 30, kFootTop + 1), col(ImVec4(205 / 255.f, 215 / 255.f, 228 / 255.f, .12f)));
-    const float ky = kFootTop + 10;
+    const float ky = kFootTop + 8;
     float x = 30;
     auto key = [&](const char* name, const char* word) {
         x += badge(L, x, ky, name) + 10;
         text(L, L.caption, 19, x, ky + (28 - 19) * 0.5f - 1, 200, look::kInk2, word);
         x += L.caption->CalcTextSizeA(19 * L.k, FLT_MAX, 0, word).x / L.k + 26;
     };
-    key("A", "Change"); key("B", "Close"); key("L1 R1", "Page"); key("D-pad", "Select");
-    const float sy = ky + 28 + 6;  // the save line: 17 px in a 23.8 px line
-    const float vw = L.caption->CalcTextSizeA(15 * L.k, FLT_MAX, 0, version).x / L.k;
-    text(L, L.caption, 17, 30, sy + 3.4f, kPanelW - 60 - vw - 12, look::kDim, "Touch works too. Changes apply and save immediately.");
-    text(L, L.caption, 15, kPanelW - 30 - vw - 1, sy + 3.4f + 1.6f, vw + 1, look::kDim, version);
-    text(L, L.caption, 15, 30, sy + 23.8f + 8 + 3.75f, kPanelW - 60, look::kDim, "Uses AMD FSR and Intel XeSS. FSR is a trademark of AMD, XeSS of Intel.");
+    key("A", "Change"); key("L1 R1", "Page"); key("B", typing ? "Back" : "Close");
+    const float vw = L.caption->CalcTextSizeA(17 * L.k, FLT_MAX, 0, version).x / L.k;
+    text(L, L.caption, 17, kPanelW - 30 - vw - 1, ky + (28 - 17) * 0.5f - 1, vw + 1, look::kDim, version);
+    // the trademarks, wrapped in two lines
+    static const char* const kTm = "Uses NVIDIA DLSS, NVIDIA Reflex and NVIDIA Streamline, AMD FSR and Intel XeSS. NVIDIA, DLSS and "
+                                   "Reflex are trademarks of NVIDIA Corporation, FSR of AMD and XeSS of Intel.";
+    look::wrapText(dl, L.caption, kTradePx * L.k, L.p(30, kTradeTop), (kPanelW - 60) * L.k, 17 * L.k, kTm, look::kDim, 2);
 }
 
 }  // namespace deck

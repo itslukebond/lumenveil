@@ -1,6 +1,6 @@
 // Host test for src/present_mode.h: which presentation a launch uses, when the native path needs a D3D12 device, and
-// when the game's own swap chain gets the tearing flag. Expected values are the spec's (docs/changes
-// presenter-copy-handover, criteria 1 and 12), written out cell by cell: [d3d12] present 0 is off (the game presents,
+// when the game's own swap chain gets the tearing flag. Expected values are written out cell by
+// cell: [d3d12] present 0 is off (the game presents,
 // no menu); 2 is always our D3D12 presenter; any other value is our presenter when a frame generation backend started at
 // launch and native when none did. Natively a D3D12 device exists only for FSR or XeSS upscaling. Tearing natively:
 // supported, not under Wine/Proton, interval 0, and not refused before.

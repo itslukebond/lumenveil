@@ -334,7 +334,7 @@ inline void drawHints(bool popupOpen, bool busy, float scale) {
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const ImU32 text = ImGui::GetColorU32(ImGuiCol_TextDisabled), plate = IM_COL32(0x2f, 0x33, 0x3a, 0xff),
                 bright = ImGui::GetColorU32(ImGuiCol_Text), line = ImGui::GetColorU32(ImGuiCol_Separator);
-    const float sp = ImGui::GetStyle().ItemSpacing.y, pad = 4 * scale, gap = 16 * scale, r = 4 * scale;
+    const float sp = ImGui::GetStyle().ItemSpacing.y, pad = 4 * scale, gap = 14 * scale, r = 4 * scale;  // 14: L1 R1 Page fits the clip
     dl->AddLine(ImVec2(p.x, p.y - sp * 0.5f), ImVec2(p.x + w, p.y - sp * 0.5f), line);  // in the gap above: moves nothing
     float x = p.x;
     auto badge = [&](const char* label) {  // returns nothing; advances x past the badge
@@ -356,7 +356,7 @@ inline void drawHints(bool popupOpen, bool busy, float scale) {
     badge(nullptr); word("Move", "Move");
     badge("A"); word(hintA(popupOpen), "Change");
     badge("B"); word(hintB(busy), "Close menu");
-    badge("L3+R3"); word("Close menu", "Close menu");
+    badge("L1 R1"); word("Page", "Page");
 }
 
 }  // namespace pad

@@ -1,5 +1,5 @@
-// Host test for src/history_rules.h: when the upscaler's history is reset. The expected values come from the spec
-// (docs/changes upscaler-history-reset), not the code: a run is a reset run exactly when it is the first run of its
+// Host test for src/history_rules.h: when the upscaler's history is reset. The expected values are written out
+// here, not taken from the code: a run is a reset run exactly when it is the first run of its
 // frame and the frame before had no run (or it is the very first frame); the gap reported at that run is the number of
 // run-less frames immediately before it. The harness uses the gate the way dlss.cpp does: the reset flag starts set,
 // a run takes and clears it (reading the gap first), and each game Present ends the frame.
