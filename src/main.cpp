@@ -120,7 +120,7 @@ CTX_HOOK(42, DispatchIndirect, true, (ID3D11DeviceContext* ctx, ID3D11Buffer* b,
 // a pivot, giving ~1 px edges at any magnification (unchanged when the text is not magnified). Pivot is
 // 0.25 of final alpha (outline: 0.25/1.333): measured 91% of the original stroke weight with 2.6x fewer
 // edge pixels; 0.5 thinned glyphs to 78% because the soft original reads heavier in the linear HDR UI.
-static std::atomic<bool> g_uiFix{true};
+static std::atomic<bool> g_uiFix{true};  // Sharper HUD ([ui] sharp, Insert menu): every replacement below and the mask twin
 // f23a: soft drop shadow (blurred atlas, peaks ~0.6); ef8f: the letters (crisp thin atlas, x1.333 + COLOR1)
 static const unsigned long long kFontPS[2] = { 0xf23a393a78379d69ull, 0xef8f94a6372f311eull };
 static void* g_fontGame[2];
@@ -229,19 +229,41 @@ float4 main(float4 pos : SV_POSITION, float4 col : COLOR0, float2 uv : TEXCOORD0
     return lerp(sharp, s / 7, w) * col;
 }
 )" };
+// The stretch on frames in which the game's TAA drew (gameplay): TAA has already smoothed the edges, so only the
+// sharpened Catmull-Rom with its clamp, without the edge-directed smoothing the title screen needs.
+static const char* kStretchLightHlsl = R"(
+float4 main(float4 pos : SV_POSITION, float4 col : COLOR0, float2 uv : TEXCOORD0) : SV_TARGET {
+    float4 b = t0.Sample(s0, uv);
+    float2 sz; t0.GetDimensions(sz.x, sz.y);
+    float2 d = fwidth(uv * sz);
+    if (max(d.x, d.y) >= 0.95) return b * col;
+    float4 c = catmullRom(uv);
+    int2 i = int2(floor(uv * sz - 0.5)), m = int2(sz) - 1;
+    float4 a0 = t0.Load(int3(clamp(i, 0, m), 0)), a1 = t0.Load(int3(clamp(i + int2(1, 0), 0, m), 0));
+    float4 a2 = t0.Load(int3(clamp(i + int2(0, 1), 0, m), 0)), a3 = t0.Load(int3(clamp(i + 1, 0, m), 0));
+    return clamp(c + 0.5 * (c - b), min(min(a0, a1), min(a2, a3)), max(max(a0, a1), max(a2, a3))) * col;
+}
+)";
+static ID3D11PixelShader* g_stretchLight;  // null: the full stretch wherever it magnifies
+static std::atomic<bool> g_taaThisFrame;    // the game's TAA drew since the last present
 static void makeHudPS(ID3D11Device* d, HRESULT(STDMETHODCALLTYPE* create)(ID3D11Device*, const void*, SIZE_T, ID3D11ClassLinkage*, ID3D11PixelShader**),
                       void* game, unsigned long long h) {
     for (int i = 0; i < 3; ++i) {
         if (h != kHudPS[i] || g_hudOurs[i]) continue;
         const pD3DCompile compile = shaderCompiler();
-        const std::string src = std::string(kCubicHlsl) + kHudHlsl[i];
-        ID3DBlob *code = nullptr, *err = nullptr;
-        HRESULT hr = compile ? compile(src.c_str(), src.size(), "ffxv_hud", nullptr, nullptr, "main", "ps_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &code, &err) : E_FAIL;
-        if (SUCCEEDED(hr)) hr = create(d, code->GetBufferPointer(), code->GetBufferSize(), nullptr, &g_hudOurs[i]);
-        logf("ui: hud ps %016llx cubic replacement %08x %s", h, hr, err ? (char*)err->GetBufferPointer() : "");
-        if (code) code->Release();
-        if (err) err->Release();
-        if (SUCCEEDED(hr)) g_hudGame[i] = game;
+        auto build = [&](const char* body, ID3D11PixelShader** out, const char* what) {
+            const std::string src = std::string(kCubicHlsl) + body;
+            ID3DBlob *code = nullptr, *err = nullptr;
+            HRESULT hr = compile ? compile(src.c_str(), src.size(), "ffxv_hud", nullptr, nullptr, "main", "ps_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &code, &err) : E_FAIL;
+            if (SUCCEEDED(hr)) hr = create(d, code->GetBufferPointer(), code->GetBufferSize(), nullptr, out);
+            logf("ui: hud ps %016llx %s %08x %s", h, what, hr, err ? (char*)err->GetBufferPointer() : "");
+            if (code) code->Release();
+            if (err) err->Release();
+            return SUCCEEDED(hr);
+        };
+        if (!build(kHudHlsl[i], &g_hudOurs[i], "cubic replacement")) continue;
+        if (i == 2) build(kStretchLightHlsl, &g_stretchLight, "light stretch");
+        g_hudGame[i] = game;
     }
 }
 
@@ -290,10 +312,10 @@ using PFN_DrawIndexed = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*, UINT, UIN
 static std::mutex g_smpMx;
 static std::unordered_map<ID3D11SamplerState*, ID3D11SamplerState*> g_biased;  // game's (ref held) -> ours, or null = untouched
 static float g_smpBias;
+static std::atomic<float> g_frameBias;  // this frame's bias, worked out in onPresent: 0 = none
 static void STDMETHODCALLTYPE hk_PSSetSamplers(ID3D11DeviceContext* ctx, UINT start, UINT n, ID3D11SamplerState* const* s) {
     using F = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*, UINT, UINT, ID3D11SamplerState* const*);
-    const DlssInfo di = dlssInfo();
-    const float bias = dlssEnabled() && di.inW && di.outW > di.inW ? std::log2(float(di.inW) / float(di.outW)) : 0.f;
+    const float bias = g_frameBias.load(std::memory_order_relaxed);
     if (bias == 0.f || !s || n > 16) return orig<F>(ctx, 10)(ctx, start, n, s);
     ID3D11SamplerState* v[16]; bool any = false;
     {
@@ -332,7 +354,7 @@ static void STDMETHODCALLTYPE hk_PSSetShader(ID3D11DeviceContext* ctx, ID3D11Pix
             if (ps == g_fontGame[i] && g_fontOurs[i] && !g_glyphSRV) ps = g_fontOurs[i];  // 2x atlas: game's own shader
         }
     if (g_uiFix && ps)
-        for (int i = 0; i < 3; ++i) if (ps == g_hudGame[i] && g_hudOurs[i]) ps = g_hudOurs[i];
+        for (int i = 0; i < 2; ++i) if (ps == g_hudGame[i] && g_hudOurs[i]) ps = g_hudOurs[i];  // 664e: per draw, stretchPick
     orig<void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*, ID3D11PixelShader*, ID3D11ClassInstance* const*, UINT)>(ctx, 9)(ctx, ps, ci, n);
 }
 
@@ -620,6 +642,30 @@ static void gameSharpenDraw(ID3D11DeviceContext* ctx, UINT c, UINT s) {
     game->Release();
 }
 
+static void setPS(ID3D11DeviceContext* ctx, ID3D11PixelShader* ps) {
+    orig<void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*, ID3D11PixelShader*, ID3D11ClassInstance* const*, UINT)>(ctx, 9)(ctx, ps, nullptr, 0);
+}
+// The stretch draw gets its shader here, where its source and viewport are known. The game makes 664e twice and uses
+// the other object for fills and a glow upsample, so it is never swapped when bound. Not magnifying (render scale 100%,
+// or DLSS's display-res output): the game's own shader stays, which is what the replacements return there. Magnifying:
+// the light stretch on frames in which the game's TAA drew, the full one otherwise. True: swapped, put the game's back.
+static bool stretchPick(ID3D11DeviceContext* ctx) {
+    if (!g_uiFix || !g_hudOurs[2]) return false;
+    D3D11_TEXTURE2D_DESC d = {};
+    ID3D11ShaderResourceView* srv = nullptr; ctx->PSGetShaderResources(0, 1, &srv);
+    if (srv) {
+        ID3D11Resource* r = nullptr; srv->GetResource(&r); srv->Release();
+        D3D11_RESOURCE_DIMENSION dim; r->GetType(&dim);
+        if (dim == D3D11_RESOURCE_DIMENSION_TEXTURE2D) ((ID3D11Texture2D*)r)->GetDesc(&d);
+        r->Release();
+    }
+    D3D11_VIEWPORT vp = {}; UINT n = 1; ctx->RSGetViewports(&n, &vp);
+    const bool magnify = d.Width && d.Height && (vp.Width > d.Width * 1.05f || vp.Height > d.Height * 1.05f);
+    if (!magnify) return false;
+    setPS(ctx, g_taaThisFrame && g_stretchLight ? g_stretchLight : g_hudOurs[2]);
+    return true;
+}
+
 static void STDMETHODCALLTYPE hk_Draw(ID3D11DeviceContext* ctx, UINT c, UINT s) {
     if (ctx == g_imm) p12FirstDraw();
     noteUiDraw(ctx);
@@ -628,6 +674,7 @@ static void STDMETHODCALLTYPE hk_Draw(ID3D11DeviceContext* ctx, UINT c, UINT s) 
         return;
     }
     if (ctx == g_imm && g_immPS && g_immPS == g_taaPS) {
+        g_taaThisFrame = true;
         void* ps = g_immPS;
         gameSharpenAfterTaa();
         if (!dlssReplaceTaa(ctx)) orig<PFN_Draw>(ctx, 13)(ctx, c, s);
@@ -644,10 +691,14 @@ static void STDMETHODCALLTYPE hk_Draw(ID3D11DeviceContext* ctx, UINT c, UINT s) 
         if (ID3D11ShaderResourceView* src = dlssBlitSource(ctx)) {
             ID3D11ShaderResourceView* game = nullptr; ctx->PSGetShaderResources(0, 1, &game);
             ctx->PSSetShaderResources(0, 1, &src);
-            orig<PFN_Draw>(ctx, 13)(ctx, c, s);
+            orig<PFN_Draw>(ctx, 13)(ctx, c, s);  // display res: no stretch
             ctx->PSSetShaderResources(0, 1, &game);
             if (game) game->Release();
-        } else orig<PFN_Draw>(ctx, 13)(ctx, c, s);
+        } else {
+            const bool ours = stretchPick(ctx);
+            orig<PFN_Draw>(ctx, 13)(ctx, c, s);
+            if (ours) setPS(ctx, (ID3D11PixelShader*)g_blitPS);
+        }
         hudlessCaptureLayer(ctx);  // the scene, before any HUD
         return;
     }
@@ -984,9 +1035,11 @@ static void STDMETHODCALLTYPE hk_DrawIndexed(ID3D11DeviceContext* ctx, UINT c, U
     orig<PFN_DrawIndexed>(ctx, 12)(ctx, c, s, b);
 }
 
-void uiToggle() {
-    g_uiFix = !g_uiFix;
-    logf("ui: HUD mask upscale %s", g_uiFix ? "ON" : "OFF");
+bool uiSharp() { return g_uiFix; }
+// From the menu, between frames.
+void uiSetSharp(bool on) {
+    g_uiFix = on;
+    logf("ui: sharper HUD %s", on ? "on" : "off");
 }
 
 static void STDMETHODCALLTYPE hk_ExecuteCommandList(ID3D11DeviceContext* ctx, ID3D11CommandList* cl, BOOL r) {
@@ -1069,6 +1122,8 @@ static void hookDevice(ID3D11Device* dev, ID3D11DeviceContext* imm) {
         wchar_t gs[16] = {};
         GetPrivateProfileStringW(L"dlss", L"game_sharpening", L"", gs, _countof(gs), path(L"ffxv_dlss.ini").c_str());
         g_gameSharpPct = gameSharpenIni(gs);
+        g_uiFix = GetPrivateProfileIntW(L"ui", L"sharp", 1, path(L"ffxv_dlss.ini").c_str()) != 0;
+        logf("ui: sharper HUD %s", g_uiFix ? "on" : "off");
         void** dvt = *(void***)dev;
         MH_CreateHook(dvt[12], (void*)hk_CreateVS, (void**)&o_CreateVS);
         MH_CreateHook(dvt[15], (void*)hk_CreatePS, (void**)&o_CreatePS);
@@ -1094,6 +1149,12 @@ static void checkDeviceRemoved();
 static void onPresent(IDXGISwapChain* sc) {
     ++g_frame;
     dlssEndFrame();
+    g_taaThisFrame = false;
+    {
+        const DlssInfo di = dlssInfo();  // the sampler hook's bias for the next frame
+        g_frameBias.store(dlssEnabled() && di.inW && di.outW > di.inW ? std::log2(float(di.inW) / float(di.outW)) : 0.f,
+                          std::memory_order_relaxed);
+    }
     if (g_frame % 60 == 1) { DXGI_SWAP_CHAIN_DESC d; if (SUCCEEDED(sc->GetDesc(&d))) dlssSetDisplaySize(d.BufferDesc.Width, d.BufferDesc.Height); }
     if (g_frame % 30 == 0) checkDeviceRemoved();
     static LARGE_INTEGER freq, last, prev; static unsigned long long lastFrame;
@@ -1119,7 +1180,6 @@ static void onPresent(IDXGISwapChain* sc) {
     homeDown = home;
     if (g_frame % 30 == 0) {
         if (DeleteFileW(path(L"ffxv_dlss.toggle").c_str())) dlssToggle();
-        if (DeleteFileW(path(L"ffxv_dlss.uifix").c_str())) uiToggle();
         if (DeleteFileW(path(L"ffxv_dlss.shot").c_str())) {
             char tag[32]; snprintf(tag, sizeof tag, "%llu", g_frame);
             dlssRequestShot(tag);
