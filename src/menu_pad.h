@@ -189,10 +189,21 @@ inline void releasePad(ImGuiIO& io) {
     lastStick() = {};
 }
 
-// -1 left, 1 right, 0 neither: pressed this frame (with key repeat) on the D-pad or the left stick (fed as the D-pad).
-inline int padLeftRight() {
-    if (ImGui::IsKeyPressed(ImGuiKey_GamepadDpadLeft)) return -1;
-    if (ImGui::IsKeyPressed(ImGuiKey_GamepadDpadRight)) return 1;
+// True while a text box (or a slider's own text entry) has the keys.
+inline bool textInputActive() {
+    const ImGuiContext& g = *GImGui;
+    return g.IO.WantTextInput || (g.ActiveId && g.InputTextState.ID == g.ActiveId);
+}
+// -1 left, 1 right, 0 neither: pressed this frame (with key repeat unless `repeat` is false) on the D-pad or the left
+// stick (fed as the D-pad), or on the keyboard's left / right arrows while keyboard navigation is on and no box is being
+// typed in (the Steam Deck layout turns keyboard navigation off).
+inline int padLeftRight(bool repeat = true) {
+    if (ImGui::IsKeyPressed(ImGuiKey_GamepadDpadLeft, repeat)) return -1;
+    if (ImGui::IsKeyPressed(ImGuiKey_GamepadDpadRight, repeat)) return 1;
+    if ((ImGui::GetIO().ConfigFlags & ImGuiConfigFlags_NavEnableKeyboard) && !textInputActive()) {
+        if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow, repeat)) return -1;
+        if (ImGui::IsKeyPressed(ImGuiKey_RightArrow, repeat)) return 1;
+    }
     return 0;
 }
 // Called right after a slider: left/right on it while it has the focus (and is not being adjusted) steps it.
@@ -204,13 +215,14 @@ inline bool padStep(int& v, int lo, int hi, int step) {
     v = n;
     return true;
 }
-// A slider the controller also steps: SliderInt, then left/right by `step` while it has the focus, also after A has
-// made it active (ImGui's own step there, a hundredth of the range, is undone). A mouse drag or typed value is left
-// alone. True when the value changed.
-inline bool padSlider(const char* id, int& v, int lo, int hi, int step, const char* fmt) {
+// A slider the controller and the keyboard also step: SliderInt, then left/right by `step` while it has the focus, also
+// after A or Space has made it active (ImGui's own step there, a hundredth of the range, is undone). A mouse drag or
+// typed value is left alone. True when the value changed.
+inline bool padSlider(const char* id, int& v, int lo, int hi, int step, const char* fmt, ImGuiSliderFlags flags = 0) {
     const int before = v;
-    ImGui::SliderInt(id, &v, lo, hi, fmt);
-    if (ImGui::IsItemActive() && GImGui->ActiveIdSource == ImGuiInputSource_Gamepad) {
+    ImGui::SliderInt(id, &v, lo, hi, fmt, flags);
+    const ImGuiInputSource src = GImGui->ActiveIdSource;
+    if (ImGui::IsItemActive() && (src == ImGuiInputSource_Gamepad || (src == ImGuiInputSource_Keyboard && !textInputActive()))) {
         v = std::clamp(before + padLeftRight() * step, lo, hi);
     } else padStep(v, lo, hi, step);
     return v != before;
@@ -224,13 +236,13 @@ inline bool padTick(bool& v) {
     return true;
 }
 
-// The keys a setting's box takes, by Windows virtual-key code; menu.cpp polls them while the menu is open (the game
-// sees no keys then). A digit key types its digit whatever the keyboard layout, with or without Shift.
+// The keys a setting's box and the desktop menu's keyboard navigation take, by Windows virtual-key code; menu.cpp polls
+// them while the menu is open (the game sees no keys then). A digit key types its digit whatever the keyboard layout, with or without Shift.
 struct TypingKey { int vk; ImGuiKey key; char ch; };
 constexpr TypingKey kTypingKeys[] = {
     { 0x08, ImGuiKey_Backspace, 0 }, { 0x0D, ImGuiKey_Enter, 0 }, { 0x1B, ImGuiKey_Escape, 0 }, { 0x23, ImGuiKey_End, 0 },
     { 0x24, ImGuiKey_Home, 0 }, { 0x25, ImGuiKey_LeftArrow, 0 }, { 0x26, ImGuiKey_UpArrow, 0 }, { 0x27, ImGuiKey_RightArrow, 0 },
-    { 0x28, ImGuiKey_DownArrow, 0 }, { 0x2E, ImGuiKey_Delete, 0 },
+    { 0x28, ImGuiKey_DownArrow, 0 }, { 0x2E, ImGuiKey_Delete, 0 }, { 0x20, ImGuiKey_Space, 0 },  // Space: opens a list
     { 0x30, ImGuiKey_0, '0' }, { 0x31, ImGuiKey_1, '1' }, { 0x32, ImGuiKey_2, '2' }, { 0x33, ImGuiKey_3, '3' }, { 0x34, ImGuiKey_4, '4' },
     { 0x35, ImGuiKey_5, '5' }, { 0x36, ImGuiKey_6, '6' }, { 0x37, ImGuiKey_7, '7' }, { 0x38, ImGuiKey_8, '8' }, { 0x39, ImGuiKey_9, '9' },
     { 0x60, ImGuiKey_Keypad0, '0' }, { 0x61, ImGuiKey_Keypad1, '1' }, { 0x62, ImGuiKey_Keypad2, '2' }, { 0x63, ImGuiKey_Keypad3, '3' },
@@ -253,15 +265,23 @@ struct TypingFeed {
     }
 };
 
-// A setting's slider (padSlider) and, beside it, a box boxW wide that the value can be typed into: Enter sets the typed
-// value (typedValue, clamped to lo..hi), Esc leaves it as it was, Up and Down step it by 1 at once. The box is left out
-// of controller navigation, so left and right on the slider still step it. *typing is set while the box is being typed
-// in. True when the value changed.
+// The text in a setting's box: the setting as `fmt` shows it ("Off", "35%", "240 fps") while idle, the bare number while
+// it is typed in.
+inline void boxText(char* buf, size_t n, int v, const char* fmt, bool typing) {
+    if (typing) std::snprintf(buf, n, "%d", v);
+    else std::snprintf(buf, n, fmt, v);
+}
+// A setting's slider (padSlider, its own text hidden) and, beside it, a box boxW wide that shows the value and that the
+// value can be typed into: Enter sets the typed value (typedValue, clamped to lo..hi), Esc leaves it as it was, Up and
+// Down step it by 1 at once. The box is left out of controller navigation, so left and right on the slider still step
+// it. *typing is set while the box is being typed in. True when the value changed.
 inline bool typedSlider(const char* id, int& v, int lo, int hi, int step, const char* fmt, float boxW, bool* typing) {
     ImGui::PushID(id);
     const float sp = ImGui::GetStyle().ItemSpacing.x;
     ImGui::SetNextItemWidth(std::max(1.0f, ImGui::GetContentRegionAvail().x - boxW - sp));
-    bool changed = padSlider("##slider", v, lo, hi, step, fmt);
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0, 0, 0, 0));  // the box shows the value, and is where it is typed
+    bool changed = padSlider("##slider", v, lo, hi, step, fmt, ImGuiSliderFlags_NoInput);
+    ImGui::PopStyleColor();
     ImGui::SameLine(0, sp);
     ImGui::SetNextItemWidth(boxW);
     struct Step { int lo, hi, v; bool stepped; } st = { lo, hi, v, false };
@@ -273,12 +293,23 @@ inline bool typedSlider(const char* id, int& v, int lo, int hi, int step, const 
         d->DeleteChars(0, d->BufTextLen); d->InsertChars(0, t); d->SelectAll();
         return 0;
     };
+    // The box always edits the digits alone, from the click that starts typing on; until then its own text is hidden
+    // and the setting is drawn over it as the slider showed it ("240 fps", "Off").
     char buf[16];
-    std::snprintf(buf, sizeof buf, "%d", v);
+    boxText(buf, sizeof buf, v, fmt, true);
+    const bool wasTyping = GImGui->ActiveId == ImGui::GetID("##box");
+    if (!wasTyping) ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0, 0, 0, 0));
     ImGui::PushItemFlag(ImGuiItemFlags_NoNav, true);
     const bool enter = ImGui::InputText("##box", buf, sizeof buf, ImGuiInputTextFlags_CharsDecimal | ImGuiInputTextFlags_EnterReturnsTrue |
                                         ImGuiInputTextFlags_AutoSelectAll | ImGuiInputTextFlags_CallbackHistory, arrows, &st);
     ImGui::PopItemFlag();
+    if (!wasTyping) {
+        ImGui::PopStyleColor();
+        char label[16];
+        boxText(label, sizeof label, v, fmt, ImGui::IsItemActive());  // the click's own frame: the digits it now edits
+        const ImVec2 at(ImGui::GetItemRectMin().x + ImGui::GetStyle().FramePadding.x, ImGui::GetItemRectMin().y + ImGui::GetStyle().FramePadding.y);
+        ImGui::GetWindowDrawList()->AddText(at, ImGui::GetColorU32(ImGuiCol_Text), label);
+    }
     if (ImGui::IsItemActive()) *typing = true;
     const int now = enter ? typedValue(buf, lo, hi, v) : st.stepped ? st.v : v;
     changed |= now != v;
