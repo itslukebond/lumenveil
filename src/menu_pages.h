@@ -364,6 +364,9 @@ inline Status status(const State& s) {
 }
 
 // ---- pages -------------------------------------------------------------------------------------------------------------
+// Tab turns the desktop page forward on a press; never with Shift (Steam's overlay key), while a number box is typed in
+// or while a list is open.
+inline int tabStep(bool pressed, bool shift, bool typing, bool busy) { return pressed && !shift && !typing && !busy ? 1 : 0; }
 inline int turn(int page, int dir) { return ((page + dir) % kPageCount + kPageCount) % kPageCount; }
 
 }  // namespace pages

@@ -71,6 +71,54 @@ static void latch() {
     CHECK(p.hide(1, kL3) == kL3);
 }
 
+// The keyboard as the game reads it (256 bytes, 0x80 = down; W is 0x11, Esc 0x01, D 0x20 in DirectInput's key codes),
+// after the menu closes: a key held at the close reads up until a read shows it released; a key not held is free
+// after one read; a key pressed after that reads down at once. With nothing latched every byte is left as it was.
+static void keyLatch() {
+    KeyLatch k;
+    unsigned char st[256], before[256];
+    for (int i = 0; i < 256; ++i) st[i] = before[i] = (unsigned char)(i * 7);  // any bytes
+    CHECK(!k.any());
+    k.hide(st);
+    CHECK(std::memcmp(st, before, 256) == 0);    // nothing latched: untouched, byte for byte
+    k.latchAll();                                // the menu closes with Esc and W held
+    CHECK(k.any());
+    std::memset(st, 0, 256); st[0x01] = 0x80; st[0x11] = 0x80;
+    k.hide(st);
+    CHECK(st[0x01] == 0 && st[0x11] == 0);       // both still held: the game reads them up
+    std::memset(st, 0, 256); st[0x11] = 0x80; st[0x20] = 0x80;  // Esc let go; D pressed after the first read
+    k.hide(st);
+    CHECK(st[0x11] == 0);                        // W still held: still hidden
+    CHECK(st[0x20] == 0x80);                     // D was free after the first read: the game sees it
+    std::memset(st, 0, 256); st[0x01] = 0x80; st[0x11] = 0x80;  // Esc pressed again
+    k.hide(st);
+    CHECK(st[0x01] == 0x80);                     // released once, so a new press shows
+    CHECK(st[0x11] == 0);
+    std::memset(st, 0, 256);
+    k.hide(st);                                  // W released
+    CHECK(!k.any());
+    st[0x11] = 0x80;
+    k.hide(st);
+    CHECK(st[0x11] == 0x80);                     // pressed again: the game sees it
+}
+
+// Buffered keyboard events while the menu is open: presses (0x80 in the data word) go, releases stay, in order.
+// The event layout is DirectInput's: offset, data, time, sequence (and a pointer-sized app word in the 24 byte form).
+struct Ev { uint32_t ofs, data, time, seq; uint64_t app; };
+static void keepUps() {
+    Ev ev[5] = { { 0x11, 0x80, 1, 1, 0 }, { 0x20, 0x00, 2, 2, 0 }, { 0x01, 0x80, 3, 3, 0 }, { 0x11, 0x00, 4, 4, 0 },
+                 { 0x0F, 0x80, 5, 5, 0 } };
+    CHECK(keepReleases((unsigned char*)ev, 5, sizeof(Ev)) == 2);
+    CHECK(ev[0].ofs == 0x20 && ev[0].data == 0 && ev[0].seq == 2);
+    CHECK(ev[1].ofs == 0x11 && ev[1].data == 0 && ev[1].seq == 4);
+    uint32_t small[3 * 4] = { 0x11, 0x00, 1, 1, 0x20, 0x80, 2, 2, 0x01, 0x00, 3, 3 };  // the 16 byte form
+    CHECK(keepReleases((unsigned char*)small, 3, 16) == 2);
+    CHECK(small[0] == 0x11 && small[4] == 0x01 && small[7] == 3);
+    CHECK(keepReleases((unsigned char*)ev, 0, sizeof(Ev)) == 0);
+    Ev downs[2] = { { 0x11, 0x80, 1, 1, 0 }, { 0x20, 0x80, 2, 2, 0 } };
+    CHECK(keepReleases((unsigned char*)downs, 2, sizeof(Ev)) == 0);
+}
+
 static void words() {
     CHECK(std::strcmp(hintA(false), "Change") == 0);
     CHECK(std::strcmp(hintA(true), "Pick") == 0);
@@ -433,6 +481,8 @@ int main() {
     comboHold();
     slots();
     latch();
+    keyLatch();
+    keepUps();
     words();
     navigation();
     if (g_fail) { std::printf("%d checks failed\n", g_fail); return 1; }

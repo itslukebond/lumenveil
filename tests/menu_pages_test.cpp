@@ -244,8 +244,14 @@ static void statusLine() {
     n.upOn = false; CHECK(std::string(status(n).up) == "Upscaling off");
 }
 
-// pages wrap both ways.
+// Tab turns forward on a press; Shift+Tab (Steam's overlay key), typing in a box or an open list turn nothing; pages
+// wrap both ways.
 static void pageKeys() {
+    CHECK(tabStep(true, false, false, false) == 1);
+    CHECK(tabStep(false, false, false, false) == 0);
+    CHECK(tabStep(true, true, false, false) == 0);
+    CHECK(tabStep(true, false, true, false) == 0);
+    CHECK(tabStep(true, false, false, true) == 0);
     CHECK(turn(2, 1) == 0); CHECK(turn(0, -1) == 2); CHECK(turn(1, 1) == 2);
 }
 

@@ -40,8 +40,8 @@ def problems(src):
     init, fonts, poll, comp, menu, deckm = (body(src, n) for n in ('menuInit', 'loadFonts', 'pollToggle', 'compose', 'drawMenu', 'drawDeckMenu'))
     if None in (init, fonts, poll, comp, menu, deckm): return ['menuInit, loadFonts, pollToggle, compose, drawMenu or drawDeckMenu not found']
     c = code(src)
-    # no new hook in the game's input path
-    if c.count('MH_CreateHook(') != 3: out.append('menu.cpp does not create exactly three hooks')
+    # no new hook in the game's input path: one call for DirectInput's read methods (hookInput's hookOnce) and one for XInput
+    if c.count('MH_CreateHook(') != 2: out.append('menu.cpp does not create exactly two kinds of hook')
     # the desktop scale is as before
     if '    g_scale = std::max(1.f, height / 1080.f);\n' not in init: out.append('the desktop scale line changed')
     # detection: the adapter's IDs and SteamDeck, logged on their own line, and the setting from [overlay] layout
@@ -111,7 +111,7 @@ if p:
     sys.exit(1)
 init = body(source, 'menuInit'); fonts = body(source, 'loadFonts'); menu = body(source, 'drawMenu')
 broken = {
-    'a fourth hook': source.replace('MH_EnableHook(MH_ALL_HOOKS);', 'MH_CreateHook(nullptr, nullptr, nullptr);\n    MH_EnableHook(MH_ALL_HOOKS);', 1),
+    'a third hook': source.replace('MH_EnableHook(MH_ALL_HOOKS);', 'MH_CreateHook(nullptr, nullptr, nullptr);\n    MH_EnableHook(MH_ALL_HOOKS);', 1),
     'scale changed': source.replace('g_scale = std::max(1.f, height / 1080.f);', 'g_scale = std::max(1.f, height / 800.f);', 1),
     'no env': source.replace('GetEnvironmentVariableA("SteamDeck"', 'GetEnvironmentVariableA("SteamDeckX"', 1),
     'no adapter ids': source.replace('deck::isSteamDeck(ad1.VendorId, ad1.DeviceId, ', 'deck::isSteamDeck(0, 0, ', 1),

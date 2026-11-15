@@ -165,7 +165,7 @@ the release) goes through it step by step, and shows how to install by hand if a
 
 Press **Insert** at any time in game to open or close the mod's menu. Changes apply straight away unless the menu says
 otherwise, and they're saved to `ffxv_dlss.ini` next to the game. The settings are on three pages: Upscaling, Frame
-generation and Overlay. Click a tab to change page, or use L1 / R1 on a controller. The arrow keys move between settings (up and down) and change
+generation and Overlay. Tab or a click on a tab changes page (L1 / R1 on a controller). The arrow keys move between settings (up and down) and change
 them (left and right); Enter or Space opens a list, and a slider's value can also be typed into its box. The box under
 the settings explains the one you're on.
 

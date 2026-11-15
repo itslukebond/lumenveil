@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include "imgui.h"
 #include "imgui_internal.h"  // ImGuiContext::ActiveIdSource: tells a slider adjusted with A from one dragged with the mouse
 
@@ -26,6 +27,50 @@ struct PadView {
     int16_t lx = 0, ly = 0;
     bool connected = false, comboDown = false;  // comboDown: L3 and R3 held together on one pad
 };
+
+// The keyboard as the game reads it (DirectInput's 256-byte state, 0x80 = down) after the menu closes: a key held at
+// the close reads up until a read shows it released, so the closing Esc or Insert, or a key held through the menu, is
+// never seen as a new press. Lock-free: the game's input thread never waits. With nothing latched a read costs four
+// relaxed loads and leaves the bytes as they were.
+struct KeyLatch {
+    std::atomic<uint64_t> w[4] = {};
+    static_assert(std::atomic<uint64_t>::is_always_lock_free, "the game's keyboard reads must never wait");
+    void latchAll() { for (auto& x : w) x.store(~uint64_t(0)); }
+    bool any() const {
+        return (w[0].load(std::memory_order_relaxed) | w[1].load(std::memory_order_relaxed) |
+                w[2].load(std::memory_order_relaxed) | w[3].load(std::memory_order_relaxed)) != 0;
+    }
+    void hide(unsigned char* st) {
+        for (int i = 0; i < 4; ++i) {
+            const uint64_t l = w[i].load(std::memory_order_relaxed);
+            if (!l) continue;
+            uint64_t up = 0;
+            for (int b = 0; b < 64; ++b) {
+                if (!(l >> b & 1)) continue;
+                unsigned char& k = st[i * 64 + b];
+                if (k & 0x80) k = 0;          // still held since the close: hidden
+                else up |= uint64_t(1) << b;  // released: free from now on
+            }
+            if (up) w[i].fetch_and(~up);
+        }
+    }
+};
+
+// Buffered keyboard events while the menu is open (DirectInput's event layout: offset, then the data word, 0x80 =
+// down; stride is the event size the game asked with): presses are dropped and releases kept, in order, so a key held
+// as the menu opens is still seen released. Returns the new count.
+inline uint32_t keepReleases(unsigned char* ev, uint32_t n, uint32_t stride) {
+    uint32_t kept = 0;
+    for (uint32_t i = 0; i < n; ++i) {
+        unsigned char* e = ev + size_t(i) * stride;
+        uint32_t data;
+        std::memcpy(&data, e + 4, sizeof data);
+        if (data & 0x80) continue;
+        if (kept != i) std::memmove(ev + size_t(kept) * stride, e, stride);
+        ++kept;
+    }
+    return kept;
+}
 
 struct PadSlots {
     struct Slot {
@@ -237,7 +282,8 @@ inline bool padTick(bool& v) {
 }
 
 // The keys a setting's box and the desktop menu's keyboard navigation take, by Windows virtual-key code; menu.cpp polls
-// them while the menu is open (the game sees no keys then). A digit key types its digit whatever the keyboard layout, with or without Shift.
+// them while the menu is open, and the game's own keyboard reads see every key up then (getState). Tab is not one of
+// them, so ImGui's own Tab focus stays off; compose reads Tab for the desktop page. A digit key types its digit whatever the keyboard layout, with or without Shift.
 struct TypingKey { int vk; ImGuiKey key; char ch; };
 constexpr TypingKey kTypingKeys[] = {
     { 0x08, ImGuiKey_Backspace, 0 }, { 0x0D, ImGuiKey_Enter, 0 }, { 0x1B, ImGuiKey_Escape, 0 }, { 0x23, ImGuiKey_End, 0 },

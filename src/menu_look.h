@@ -508,7 +508,7 @@ inline int layoutButton(const char* id, bool portable, bool enabled, float w, fl
     return layoutPick(portable, mouse, ImGui::GetIO().MousePos.x, std::floor((a.x + b.x) * 0.5f), lr, clicked && !mouse);
 }
 // The desktop menu's page tabs across w from the cursor, h high: the names in spaced capitals, the current one in ink
-// with a short static underline. Never navigation stops (a click or L1 / R1 turns pages). Returns the page to
+// with a short static underline. Never navigation stops (a click, Tab or L1 / R1 turns pages). Returns the page to
 // show: a clicked tab's, else page.
 inline int tabs(int page, const char* const* names, int n, float w, float h) {
     const float s = ctx().s;

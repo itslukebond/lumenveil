@@ -88,6 +88,7 @@ std::atomic<bool> g_open;  // read by the game's input hooks on their own thread
 // opened it this frame; g_padBusy: last frame a list was open or a slider was being adjusted (B backs out instead of
 // closing); g_padRelease: the menu closed, release the controller keys next frame.
 pad::PadSlots g_pad;
+pad::KeyLatch g_keyLatch;  // keys held as the menu closed, hidden from the game's keyboard reads until released
 pad::EmptySlots g_emptySlots;  // empty controller slots answered from the cache (the hook) and their counts (logged once)
 pad::PadView g_padView;
 bool g_padUsed, g_padOpened, g_padBusy, g_padRelease;
@@ -161,8 +162,9 @@ std::wstring gameConfig() {
 using PFN_GetDeviceState = HRESULT(STDMETHODCALLTYPE*)(IDirectInputDevice8W*, DWORD, LPVOID);
 using PFN_GetDeviceData = HRESULT(STDMETHODCALLTYPE*)(IDirectInputDevice8W*, DWORD, LPDIDEVICEOBJECTDATA, LPDWORD, DWORD);
 using PFN_XInputGetState = DWORD(WINAPI*)(DWORD, XINPUT_STATE*);
-PFN_GetDeviceState o_GetDeviceState[2];
-PFN_GetDeviceData o_GetDeviceData[2];
+constexpr int kHookSlots = 4;  // distinct DirectInput read methods hooked: mouse and keyboard, each for A and W
+PFN_GetDeviceState o_GetDeviceState[kHookSlots];
+PFN_GetDeviceData o_GetDeviceData[kHookSlots];
 PFN_XInputGetState o_XInputGetState;
 std::atomic<DWORD> g_diTid, g_xiTid;
 std::atomic<unsigned> g_diPolls;
@@ -171,10 +173,16 @@ bool isMouse(IDirectInputDevice8W* d) {
     DIDEVCAPS c = { sizeof c };
     return SUCCEEDED(d->GetCapabilities(&c)) && GET_DIDEVICE_TYPE(c.dwDevType) == DI8DEVTYPE_MOUSE;
 }
+bool isKeyboard(IDirectInputDevice8W* d) {
+    DIDEVCAPS c = { sizeof c };
+    return SUCCEEDED(d->GetCapabilities(&c)) && GET_DIDEVICE_TYPE(c.dwDevType) == DI8DEVTYPE_KEYBOARD;
+}
 
 HRESULT getState(int v, IDirectInputDevice8W* d, DWORD cb, LPVOID data) {
     HRESULT hr = o_GetDeviceState[v](d, cb, data);
     g_diTid = GetCurrentThreadId(); ++g_diPolls;
+    // menu closed: a keyboard state (256 bytes; a mouse's is 16 or 20, a pad's 80 or 272) keeps a key held at the close up
+    if (!g_open && SUCCEEDED(hr) && data && cb == 256 && g_keyLatch.any()) g_keyLatch.hide((unsigned char*)data);
     if (!g_open || FAILED(hr) || !data) return hr;
     if (isMouse(d)) {
         std::lock_guard<std::mutex> lk(g_inMx);
@@ -215,13 +223,14 @@ HRESULT getData(int v, IDirectInputDevice8W* d, DWORD cb, LPDIDEVICEOBJECTDATA o
         g_diMouseTick = GetTickCount64();
         ++g_inStats.dataReads; g_inStats.events += *n;
     }
-    if (!(fl & DIGDD_PEEK)) *n = 0;  // events consumed by the menu
+    // a keyboard's presses go and its releases stay, so a key held as the menu opened is seen released; other events
+    // are consumed by the menu
+    if (od && isKeyboard(d)) *n = pad::keepReleases((unsigned char*)od, *n, cb);
+    else if (!(fl & DIGDD_PEEK)) *n = 0;
     return hr;
 }
-HRESULT STDMETHODCALLTYPE hk_GetDeviceStateW(IDirectInputDevice8W* d, DWORD cb, LPVOID p) { return getState(0, d, cb, p); }
-HRESULT STDMETHODCALLTYPE hk_GetDeviceStateA(IDirectInputDevice8W* d, DWORD cb, LPVOID p) { return getState(1, d, cb, p); }
-HRESULT STDMETHODCALLTYPE hk_GetDeviceDataW(IDirectInputDevice8W* d, DWORD cb, LPDIDEVICEOBJECTDATA o, LPDWORD n, DWORD f) { return getData(0, d, cb, o, n, f); }
-HRESULT STDMETHODCALLTYPE hk_GetDeviceDataA(IDirectInputDevice8W* d, DWORD cb, LPDIDEVICEOBJECTDATA o, LPDWORD n, DWORD f) { return getData(1, d, cb, o, n, f); }
+template <int S> HRESULT STDMETHODCALLTYPE hk_GetDeviceState(IDirectInputDevice8W* d, DWORD cb, LPVOID p) { return getState(S, d, cb, p); }
+template <int S> HRESULT STDMETHODCALLTYPE hk_GetDeviceData(IDirectInputDevice8W* d, DWORD cb, LPDIDEVICEOBJECTDATA o, LPDWORD n, DWORD f) { return getData(S, d, cb, o, n, f); }
 // The game's controller read: published for the menu without a lock (this is the game's input thread), then blanked
 // while the menu is open; while it is closed, a button held when the menu closed stays hidden until released. A slot
 // that answered "not connected" is answered from the cache until its re-ask time, as Microsoft recommends.
@@ -240,27 +249,35 @@ DWORD WINAPI hk_XInputGetState(DWORD i, XINPUT_STATE* s) {
     return r;
 }
 
-// DirectInput's device methods are shared code for every device: hook them through throwaway devices of our own.
+// Each device kind's read methods are hooked through a throwaway device of that kind: another program's overlay can
+// give the mouse and the keyboard methods of their own, and A and W may share them. One hook per distinct method.
 void hookInput() {
     using PFN_DI8Create = HRESULT(WINAPI*)(HINSTANCE, DWORD, REFIID, LPVOID*, LPUNKNOWN);
     if (auto create = (PFN_DI8Create)GetProcAddress(LoadLibraryW(L"dinput8.dll"), "DirectInput8Create")) {
         const IID* iids[2] = { &IID_IDirectInput8W, &IID_IDirectInput8A };
-        void* states[2] = { (void*)hk_GetDeviceStateW, (void*)hk_GetDeviceStateA };
-        void* datas[2] = { (void*)hk_GetDeviceDataW, (void*)hk_GetDeviceDataA };
-        void* hooked = nullptr;
+        void* const states[kHookSlots] = { (void*)hk_GetDeviceState<0>, (void*)hk_GetDeviceState<1>, (void*)hk_GetDeviceState<2>, (void*)hk_GetDeviceState<3> };
+        void* const datas[kHookSlots] = { (void*)hk_GetDeviceData<0>, (void*)hk_GetDeviceData<1>, (void*)hk_GetDeviceData<2>, (void*)hk_GetDeviceData<3> };
+        void* stateAt[kHookSlots] = {}; void* dataAt[kHookSlots] = {};
+        int nState = 0, nData = 0;
+        auto hookOnce = [](void* target, void** at, int& n, void* const* hooks, void** orig) {
+            for (int i = 0; i < n; ++i) if (at[i] == target) return;  // the same method already hooked for another device
+            if (n < kHookSlots && MH_CreateHook(target, hooks[n], &orig[n]) == MH_OK) at[n++] = target;
+        };
         for (int v = 0; v < 2; ++v) {
-            IDirectInput8W* di = nullptr; IDirectInputDevice8W* dev = nullptr;
-            if (SUCCEEDED(create(GetModuleHandleW(nullptr), DIRECTINPUT_VERSION, *iids[v], (void**)&di, nullptr)) &&
-                SUCCEEDED(di->CreateDevice(GUID_SysMouse, &dev, nullptr))) {
-                void** vt = *(void***)dev;
-                if (vt[9] != hooked) {  // A and W may share the code; hook it once
-                    MH_CreateHook(vt[9], states[v], (void**)&o_GetDeviceState[v]);
-                    MH_CreateHook(vt[10], datas[v], (void**)&o_GetDeviceData[v]);
-                    hooked = vt[9];
-                } else { o_GetDeviceState[v] = o_GetDeviceState[0]; o_GetDeviceData[v] = o_GetDeviceData[0]; }
+            IDirectInput8W* di = nullptr;
+            if (FAILED(create(GetModuleHandleW(nullptr), DIRECTINPUT_VERSION, *iids[v], (void**)&di, nullptr))) continue;
+            for (const GUID* g : { &GUID_SysMouse, &GUID_SysKeyboard }) {
+                IDirectInputDevice8W* dev = nullptr;
+                if (SUCCEEDED(di->CreateDevice(*g, &dev, nullptr))) {
+                    void** vt = *(void***)dev;
+                    hookOnce(vt[9], stateAt, nState, states, (void**)o_GetDeviceState);
+                    hookOnce(vt[10], dataAt, nData, datas, (void**)o_GetDeviceData);
+                }
+                release(dev);
             }
-            release(dev); release(di);
+            release(di);
         }
+        logf("menu: input read hooks: %d state, %d data", nState, nData);
     }
     if (FARPROC x = GetProcAddress(LoadLibraryW(L"xinput9_1_0.dll"), "XInputGetState"))
         MH_CreateHook((void*)x, (void*)hk_XInputGetState, (void**)&o_XInputGetState);
@@ -979,8 +996,8 @@ void drawStatus(ImDrawList* dl, ImFont* f, float size, ImVec2 p, const pages::St
     put(st.fg, st.fgTone == pages::kVendor && st.fgVendor >= 0 ? kAccents[st.fgVendor].hi : st.fgTone == pages::kDim ? look::kDim : look::kInk2);
 }
 
-// The desktop menu's page and the help box's row (kept while the mouse is off the rows); g_pageTurn: L1 or R1
-// from compose, applied by drawMenu.
+// The desktop menu's page and the help box's row (kept while the mouse is off the rows); g_pageTurn: Tab, L1
+// or R1 from compose, applied by drawMenu.
 int g_deskPage;
 pages::Id g_deskHelp = pages::kUpscaler;
 int g_pageTurn;
@@ -1038,7 +1055,7 @@ void drawMenu() {
         if (want >= 0) switchLayout(want == 1);
     }
 
-    // ---- tabs: a click or L1 / R1 (from compose) change page; a new page starts on its first row
+    // ---- tabs: a click, Tab or L1 / R1 (from compose) change page; a new page starts on its first row
     static const char* const kPageNames[] = { "Upscaling", "Frame generation", "Overlay" };
     ImGui::SetCursorScreenPos(ImVec2(x0, win->Pos.y + Z::kTabsTop * s));
     int to = look::tabs(g_deskPage, kPageNames, 3, cw, Z::kTabsH * s);
@@ -1130,6 +1147,7 @@ void drawMenu() {
         const ImVec2 k = ImGui::GetCursorScreenPos();
         float x = look::keyHint(dl, k.x, k.y, h, "\xE2\x86\x91\xE2\x86\x93", "Select") + 18 * s;
         x = look::keyHint(dl, x, k.y, h, "\xE2\x86\x90\xE2\x86\x92", "Change") + 18 * s;
+        x = look::keyHint(dl, x, k.y, h, "Tab", "Page") + 18 * s;
         look::keyHint(dl, x, k.y, h, "Ins", "Close");
     }
     ImGui::PopClipRect();
@@ -1327,6 +1345,7 @@ void loadLogo() {
 // released, so the press that closed the menu does not also reach the game.
 void closeMenu() {
     g_pad.latchAll();
+    g_keyLatch.latchAll();
     g_open = false;
     g_padUsed = false;
     g_padRelease = true;
@@ -1559,10 +1578,16 @@ bool compose(IDXGISwapChain3* sc, UINT index, bool layer) {
             pad::stickPast(g_padView.ly, 1) || pad::stickPast(g_padView.ly, -1))
             g_padUsed = true;
     } else if (g_padRelease) { pad::releasePad(io); g_padRelease = false; }
-    // the desktop menu's pages: a click on a tab, or L1 / R1, not while a box is typed in or a list is open
-    if (g_open && !g_deckOpen && !g_typing && !g_padBusy) {
-        const int turn = (g_padView.edges & pad::kR1) ? 1 : (g_padView.edges & pad::kL1) ? -1 : 0;
-        if (turn) g_pageTurn = turn;
+    {  // the desktop menu's pages: Tab (never given to ImGui, so its own Tab focus stays off), L1 / R1 or a click on a
+       // tab; not while a box is typed in or a list is open. Shift+Tab is Steam's overlay key, so it turns nothing.
+        static bool tabDown;
+        const bool tab = front && (GetAsyncKeyState(VK_TAB) & 0x8000) != 0, shift = front && (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
+        if (g_open && !g_deckOpen) {
+            int turn = pages::tabStep(tab && !tabDown, shift, g_typing, g_padBusy);
+            if (!turn && !g_typing && !g_padBusy) turn = (g_padView.edges & pad::kR1) ? 1 : (g_padView.edges & pad::kL1) ? -1 : 0;
+            if (turn) g_pageTurn = turn;
+        }
+        tabDown = tab;
     }
     // the Steam Deck layout moves its own focus, so ImGui's must not move too; the desktop menu gets it back
     if (g_open && g_deckOpen) io.ConfigFlags &= ~ImGuiConfigFlags_NavEnableGamepad;

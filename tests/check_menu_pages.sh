@@ -3,7 +3,7 @@
 # fit test) with the host compiler and runs it with the bundled TeX Gyre Adventor, then checks menu.cpp's structure: both
 # layouts take their rows, help and status from menu_pages.h; the Portable mode row is gone and only the layout button
 # changes the layout while the menu is open; Tab is not one of the typing keys ImGui sees; every setter writes the same
-# ini keys as before; the desktop menu is a fixed size with no scrollbar; the desktop's L1 / R1 turn the page only when no
+# ini keys as before; the desktop menu is a fixed size with no scrollbar; the desktop's Tab, L1 and R1 turn the page only when no
 # box is typed in and no list is open; a desktop page change starts on the first row. Each source check must fail on a broken copy.
 # Usage: tests/check_menu_pages.sh [source folder holding menu_pages.h and menu.cpp] [Dear ImGui folder]
 #        (defaults: src next to tests; third_party/imgui next to tests, or $IMGUI)
@@ -58,19 +58,24 @@ def problems(src, pd):
     # Tab is never one of the keys ImGui sees, so ImGui's own Tab focus stays off
     keys = re.search(r'kTypingKeys\[\] = \{(.*?)\n\};', pd, re.S)
     if not keys or re.search(r'\{ *0x09\b|ImGuiKey_Tab', keys.group(1)): out.append('Tab is one of the typing keys')
-    # the desktop page keys: L1 / R1 in compose, with the typing and list guards; no keyboard page key (the game sees the
-    # key too and acts on it)
+    # the desktop page keys in compose: Tab through pages::tabStep with the typing and list guards, then L1 / R1 under the
+    # same guards; the Tab edge follows the key every frame, outside the open block, so a Tab held while typing does not
+    # turn the page when typing ends
     k = code(comp)
-    if re.search(r'VK_TAB', k): out.append('Tab turns the desktop page')
-    if not re.search(r'if \(g_open && !g_deckOpen && !g_typing && !g_padBusy\) \{\n\s*const int turn = \(g_padView\.edges & pad::kR1\) \? 1 : \(g_padView\.edges & pad::kL1\) \? -1 : 0;', k):
+    blk = re.search(r'if \(g_open && !g_deckOpen\) \{\n(.*?)\n        \}\n\s*tabDown = tab;', k, re.S)
+    if not blk or 'int turn = pages::tabStep(tab && !tabDown, shift, g_typing, g_padBusy);' not in blk.group(1):
+        out.append('Tab does not turn the desktop page through pages::tabStep with its guards')
+    if not blk or not re.search(r'if \(!turn && !g_typing && !g_padBusy\) turn = \(g_padView\.edges & pad::kR1\) \? 1 : \(g_padView\.edges & pad::kL1\) \? -1 : 0;', blk.group(1)):
         out.append('L1 and R1 do not turn the desktop page, or turn it while typing')
+    if not re.search(r'"Change"\) \+ 18 \* s;\n\s*x = look::keyHint\(dl, x, k\.y, h, "Tab", "Page"\) \+ 18 \* s;\n\s*look::keyHint\(dl, x, k\.y, h, "Ins", "Close"\);', code(menu)):
+        out.append('the desktop footer does not show Tab Page between Change and Ins Close')
     # the ini keys are the same as before
     got = set(re.findall(r'iniSet\(L"([a-z0-9_]+)", L"([a-z0-9_]+)"', c))
     if got != KEYS: out.append('the menu saves different ini keys: %s' % sorted(got ^ KEYS))
     # the desktop menu: a fixed size from the slots, no scrollbar, no scrolling with the wheel
     m = code(menu)
     if 'ImGui::SetNextWindowSize({ 600 * s, Z::kHeight * s }, ImGuiCond_Always);' not in m: out.append('the desktop menu is not a fixed size')
-    # a page change (a tab click, L1, R1) puts the focus and the help on the new page's first row
+    # a page change (a tab click, Tab, L1, R1) puts the focus and the help on the new page's first row
     if not re.search(r'if \(g_pageTurn\) \{ to = pages::turn\(g_deskPage, g_pageTurn\); g_pageTurn = 0; \}\n\s*const bool turned = to != g_deskPage;', m) \
             or not re.search(r'if \(\(turned \|\| [^\n]*\) && i == 0\) look::focusItem\(', m) or 'if (n && (turned || ' not in m:
         out.append('a desktop page change does not start on the first row')
@@ -89,8 +94,10 @@ broken = {
     'Portable mode row back': (source.replace(menu, menu + '    look::portable("Portable mode");\n', 1), pad),
     'layout set on open': (source.replace('            g_open = true;\n', '            g_open = true;\n            g_layout = 2;\n', 1), pad),
     'Tab fed to ImGui': (source, pad.replace('{ 0x08, ImGuiKey_Backspace, 0 },', '{ 0x08, ImGuiKey_Backspace, 0 }, { 0x09, ImGuiKey_Tab, 0 },', 1)),
-    'Tab turns the page': (source.replace(comp, comp.replace('        if (turn) g_pageTurn = turn;', '        if (turn) g_pageTurn = turn;\n        if (GetAsyncKeyState(VK_TAB) & 0x8000) g_pageTurn = 1;', 1), 1), pad),
-    'L1 while typing': (source.replace('if (g_open && !g_deckOpen && !g_typing && !g_padBusy) {', 'if (g_open && !g_deckOpen) {', 1), pad),
+    'no Tab page key': (source.replace('int turn = pages::tabStep(tab && !tabDown, shift, g_typing, g_padBusy);', 'int turn = 0;', 1), pad),
+    'Tab while typing': (source.replace('pages::tabStep(tab && !tabDown, shift, g_typing, g_padBusy)', 'pages::tabStep(tab && !tabDown, shift, false, g_padBusy)', 1), pad),
+    'L1 while typing': (source.replace('if (!turn && !g_typing && !g_padBusy) turn = ', 'if (!turn) turn = ', 1), pad),
+    'no Tab hint': (source.replace(menu, menu.replace('        x = look::keyHint(dl, x, k.y, h, "Tab", "Page") + 18 * s;\n', '', 1), 1), pad),
     'new ini key': (source.replace('iniSet(L"ui", L"sharp"', 'iniSet(L"ui", L"sharper"', 1), pad),
     'growing window': (source.replace('ImGui::SetNextWindowSize({ 600 * s, Z::kHeight * s }, ImGuiCond_Always);', 'ImGui::SetNextWindowSize({ 600 * s, 0 }, ImGuiCond_Always);', 1), pad),
     'turn keeps the focus': (source.replace(menu, menu.replace('if ((turned || opening', 'if ((opening', 1), 1), pad),
