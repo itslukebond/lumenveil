@@ -50,10 +50,11 @@ def problems(src):
     if not re.search(r'logf\("menu: adapter %04x:%04x, Steam Deck %s \(%s\), layout %s"', i): out.append('no adapter line in the log')
     if i.find('g_layout = ') > i.find('loadFonts();') or i.find('g_isDeck = ') > i.find('loadFonts();'):
         out.append('the detection runs after the fonts are loaded')
-    # the Deck fonts: after the desktop's, only on a Deck or with Layout not Automatic
+    # the Deck fonts: after the desktop's, on every machine (a PC can pick the Deck layout in the menu)
     f = code(fonts)
-    gate = f.find('if (g_isDeck || g_layout != 0) {')
-    if gate < 0: out.append('the Deck fonts are not loaded under g_isDeck || g_layout != 0')
+    blk = re.search(r'\n    \{ *\n[^\n]*OversampleH', f)
+    gate = blk.start() if blk else -1
+    if gate < 0 or 'g_layout' in f or 'g_isDeck' in f: out.append('the Deck fonts are not loaded on every machine')
     elif any(f.rfind(x) > gate for x in ('g_font = load(', 'g_big = load(', 'g_bigThin = load(', 'AddFontDefault(')):
         out.append('a desktop font loads after the Deck fonts')
     elif f.count('g_deck26') < 1 or f.find('g_deck26') < gate: out.append('the Deck fonts load outside their condition')
@@ -67,11 +68,12 @@ def problems(src):
         out.append('compose does not give the controller navigation back outside the Deck layout')
     if k.find('NavEnableGamepad') > k.find('ImGui::NewFrame();'): out.append('the navigation flag is set after NewFrame')
     if not re.search(r'if \(g_open\) \{ if \(g_deckOpen\) drawDeckMenu\(\); else drawMenu\(\); \}', k): out.append('compose does not draw the desktop menu outside the Deck layout')
-    # the desktop Layout row: under the fonts' condition, after Position, saved to [overlay] layout
+    # the desktop Layout row: on every machine, after Position, saved to [overlay] layout
     m = code(menu)
-    row = re.search(r'if \(g_isDeck \|\| g_layout != 0\) \{ *\n((?:[^\n]*\n){1,4}?)    \}\n', m)
-    if not row or 'label("Layout");' not in row.group(1) or 'iniSet(L"overlay", L"layout", g_layout)' not in row.group(1):
-        out.append('the desktop Layout row is not under g_isDeck || g_layout != 0')
+    row = re.search(r'\n    \{ *(?://[^\n]*)?\n((?:[^\n]*\n){1,4}?)    \}\n', m)
+    if not row or 'label("Layout");' not in row.group(1) or 'iniSet(L"overlay", L"layout", g_layout)' not in row.group(1) \
+            or 'g_isDeck || g_layout' in m:
+        out.append('the desktop Layout row is not shown on every machine')
     elif row.start() < m.find('label("Position");'): out.append('the desktop Layout row is not after Position')
     if m.count('label("Layout")') != 1: out.append('the desktop menu shows Layout outside its condition')
     # the Deck menu saves as the desktop does: same setters, same ini keys and game setting
@@ -101,13 +103,13 @@ broken = {
     'no adapter ids': source.replace('deck::isSteamDeck(ad1.VendorId, ad1.DeviceId, ', 'deck::isSteamDeck(0, 0, ', 1),
     'layout not read': source.replace('iniGet(L"overlay", L"layout", 0)', 'iniGet(L"overlay", L"layoutx", 0)', 1),
     'no log line': source.replace('logf("menu: adapter %04x:%04x', 'printf("menu: adapter %04x:%04x', 1),
-    'fonts always': source.replace(fonts, fonts.replace('if (g_isDeck || g_layout != 0) {', 'if (true) {', 1), 1),
+    'fonts on a Deck only': source.replace(fonts, fonts.replace('    {  // the Steam Deck layout', '    if (g_isDeck || g_layout != 0) {  // the Steam Deck layout', 1), 1),
     'desktop font after': source.replace(fonts, fonts.replace('        if (!g_deck19) g_deck19 = g_deck26;\n    }\n', '        if (!g_deck19) g_deck19 = g_deck26;\n    }\n    if (!g_font) g_font = load(sys, 1);\n', 1), 1),
     'layout picked each frame': source.replace('    if (g_counter) drawCounter();', '    g_deckOpen = g_isDeck;\n    if (g_counter) drawCounter();', 1),
     'nav not given back': source.replace('else io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;', '', 1),
     'nav off always': source.replace('if (g_open && g_deckOpen) io.ConfigFlags &= ~ImGuiConfigFlags_NavEnableGamepad;', 'io.ConfigFlags &= ~ImGuiConfigFlags_NavEnableGamepad;', 1),
     'deck menu always': source.replace('if (g_open) { if (g_deckOpen) drawDeckMenu(); else drawMenu(); }', 'if (g_open) drawDeckMenu();', 1),
-    'layout row always': source.replace(menu, menu.replace('if (g_isDeck || g_layout != 0) {', 'if (true) {', 1), 1),
+    'layout row on a Deck only': source.replace(menu, menu.replace('    {  // every machine', '    if (g_isDeck || g_layout != 0) {  // every machine', 1), 1),
     'layout row not saved': source.replace(menu, menu.replace('iniSet(L"overlay", L"layout", g_layout)', 'iniSet(L"overlay", L"layouts", g_layout)', 1), 1),
     'deck own ratio': source.replace(body(source, 'drawDeckMenu'), body(source, 'drawDeckMenu').replace('scaleState()', 'ownScale()'), 1),
     'deck shows reflex': source.replace(body(source, 'drawDeckMenu'), body(source, 'drawDeckMenu') + '    deck::status(L, "##reflex", deck::kDim);\n', 1),

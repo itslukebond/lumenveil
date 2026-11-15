@@ -88,7 +88,7 @@ bool g_padUsed, g_padOpened, g_padBusy, g_padRelease;
 bool g_typing;  // last frame a setting's box was being typed in: Esc then leaves the box, not the menu
 // The Steam Deck layout (menu_deck.h): g_isDeck, a Steam Deck was detected; g_layout, [overlay] layout (0 Automatic,
 // 1 Steam Deck, 2 Desktop); g_deckOpen, this opening of the menu uses the Deck layout. Its fonts are built at
-// g_deckFontK times their design size, and only on a Deck or with Layout not Automatic (else null).
+// g_deckFontK times their design size, on every machine, so a PC can switch to the Deck layout without a restart.
 bool g_isDeck, g_deckOpen;
 int g_layout;
 float g_deckFontK = 1;
@@ -498,7 +498,7 @@ void loadFonts() {
     if (!(g_bigThin = load(mod + L"texgyreadventor-regular.otf", std::round(38 * g_scale)))) g_bigThin = load(sys + L"segoeui.ttf", std::round(40 * g_scale));
     if (!g_big) g_big = g_font;
     if (!g_bigThin) g_bigThin = g_big;
-    if (g_isDeck || g_layout != 0) {  // the Steam Deck layout's 26, 24 and 19 px, after the desktop's fonts, which stay as they were
+    {  // the Steam Deck layout's 26, 24 and 19 px, after the desktop's fonts, which stay as they were
         cfg.OversampleH = cfg.OversampleV = 1;  // large sizes need none; keeps the atlas small
         ImFont** deckFonts[3] = { &g_deck26, &g_deck24, &g_deck19 };
         const float px[3] = { 26, 24, 19 };
@@ -970,7 +970,7 @@ void drawMenu() {
     static const char* corners[] = { "Top left", "Top right", "Bottom left", "Bottom right" };
     label("Position");
     if (ImGui::Combo("##corner", &g_corner, corners, 4)) iniSet(L"overlay", L"corner", g_corner);
-    if (g_isDeck || g_layout != 0) {  // the way back to the Steam Deck layout; a PC on Automatic never shows it
+    {  // every machine: a handheld the mod does not recognise picks the Steam Deck layout here
         static const char* layouts[] = { "Automatic", "Steam Deck", "Desktop" };
         label("Layout");
         if (ImGui::Combo("##layout", &g_layout, layouts, 3)) iniSet(L"overlay", L"layout", g_layout);

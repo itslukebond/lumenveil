@@ -170,7 +170,8 @@ With a controller, hold both sticks in (L3 and R3) for half a second to open or 
 stick to move, A to change a setting and B to close a list or the menu. On a Steam Deck this works without a keyboard.
 
 On a Steam Deck the menu switches to a larger layout with three pages; L1 and R1 change page. To use the normal menu,
-for example on a TV, set Layout to Desktop on the Overlay page.
+for example on a TV, set Layout to Desktop on the Overlay page. On another handheld, set Layout to Steam Deck at the
+bottom of the normal menu.
 
 <p align="center">
   <img src="docs/images/menu.png" alt="The mod's menu in game: DLSS at Performance, DLSS Frame Generation at 2x, Reflex on" width="420">
@@ -189,7 +190,7 @@ for example on a TV, set Layout to Desktop on the Overlay page.
 | **Frame cap** | Off, Auto or Custom. Auto caps just under your display's refresh rate, so G-Sync, FreeSync or Adaptive Sync stays engaged. Pair it with V-Sync on in your driver's control panel. |
 | **Sharper HUD** | On by default. Crisper HUD text, icons and title screen at 4K, at a small cost in frame rate. Untick it for a little more fps. |
 | **FPS counter** | Show or hide the counter and pick its corner. It shows the fps you see and the base fps the game renders. |
-| **Layout** | Automatic, Steam Deck or Desktop. Automatic uses the larger Steam Deck layout on a Steam Deck and the normal menu everywhere else. The normal menu shows this setting only on a Steam Deck or once it is not Automatic; on another handheld, put `layout=1` under `[overlay]` in `ffxv_dlss.ini`. A change applies the next time the menu opens. |
+| **Layout** | Automatic, Steam Deck or Desktop. Automatic uses the larger Steam Deck layout on a Steam Deck and the normal menu everywhere else. On another handheld, such as a ROG Ally or Legion Go, pick Steam Deck here. A change applies the next time the menu opens. |
 
 <p align="center">
   <img src="docs/images/fps-counter.png" alt="The fps counter: 222 fps shown, 111 rendered, frame generation 2x, RTX 5090, DLSS 310.9.16" width="420">
