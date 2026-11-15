@@ -111,7 +111,7 @@ static Frame frame(bool dim = false, RowIn pad = {}, RowIn spad = {}) {  // pad:
     f.sliderChanged = slider(L, "##limit", "Cap", g_slider, 30, 480, 5, " fps", sl, g_typing, &so);
     row(4, so);
     f.bodyEnd = L.y;
-    footer(L, "Saves at once");
+    footer(L, "Lumenveil 0.0.0");
     end(L);
     ImGui::Render();
     return f;
@@ -139,7 +139,7 @@ static void layout() {
         for (int i = 0; i < f.nRects; ++i) {
             const ImRect& r = f.rects[i];
             CHECK(r.Min.x >= o.x && r.Max.x <= o.x + 760 * k + 0.01f);
-            CHECK(r.Min.y >= o.y + 142 * k && r.Max.y <= o.y + 704 * k + 0.01f);
+            CHECK(r.Min.y >= o.y + kTabBottom * k && r.Max.y <= o.y + kFootTop * k + 0.01f);
             CHECK(near(r.GetHeight(), 66 * k)); CHECK(near(r.GetWidth(), 720 * k));
         }
         CHECK(f.bodyEnd <= kFootTop);

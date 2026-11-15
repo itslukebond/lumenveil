@@ -1,7 +1,7 @@
 // The desktop Insert menu's and the FPS counter's look, after FFXV's own menus: a near-black panel fading to the right
-// with a blue light streak along the top and thin corner brackets, section names in spaced capitals, a diamond cursor on
-// the selected row, options as ‹ value ›, square toggles that animate, hairline sliders with a diamond knob, and the
-// counter's frame time graph. Dear ImGui's own widgets keep focus, navigation, clicks, lists and typing; this draws
+// with a blue light streak along the top and thin corner brackets, section names in spaced capitals, a pointing glove
+// cursor on the selected row, options as ‹ value ›, square toggles that animate, hairline sliders with a diamond knob, and the
+// counter's frame time graph, and the Portable mode switch. Dear ImGui's own widgets keep focus, navigation, clicks, lists and typing; this draws
 // around them. Free of Windows types so tests/menu_look_test.cpp covers it on the host. Sizes are in ctx().s units;
 // colours are sRGB and always go through ImGui::GetColorU32, so a disabled row fades with it.
 #pragma once
@@ -30,6 +30,7 @@ struct Ctx {
     ImFont* fontSmall = nullptr;  // not "small": a Windows header defines it
     bool rowSel = false;  // the row opened last is the selected one
     float widgetX = 0;    // where the current row's widget starts (screen x)
+    float bob = 0;        // the glove's sway this frame (0..2 design px), set once a frame from the clock, never in row()
 };
 inline Ctx& ctx() { static Ctx c; return c; }
 inline ImFont* smallFont() { return ctx().fontSmall ? ctx().fontSmall : ImGui::GetFont(); }
@@ -60,6 +61,26 @@ inline float toggleAge(ImGuiStorage& st, ImGuiID id, bool on, float now) {
     const ImGuiID kv = ImHashData(&id, sizeof id, 0x76a1u), kt = ImHashData(&id, sizeof id, 0x7713u);
     const int seen = st.GetInt(kv, 0), want = on ? 2 : 1;
     if (!seen) { st.SetInt(kv, want); st.SetFloat(kt, now - kStill); return kStill; }
+    if (seen != want) { st.SetInt(kv, want); st.SetFloat(kt, now); }
+    return now - st.GetFloat(kt, now - kStill);
+}
+
+// The glove's sway at t seconds: 0 to 2 px and back every 1.1 s, eased at both turns.
+inline float bobX(double t) { return float(1 - std::cos(6.283185307179586 * t / 1.1)); }
+
+// The Portable mode switch's knob, 0 at the Off end to 1 at the On end, `age` seconds after a flip: it glides over
+// 0.15 s, eased at both ends.
+inline float knobAt(bool on, float age) {
+    const float t = std::clamp(age / 0.15f, 0.f, 1.f), e = t * t * (3 - 2 * t);
+    return on ? e : 1 - e;
+}
+// Seconds since switch `id` last flipped, kept in `st`. A switch not drawn on the frame before (the menu has just
+// opened, or the layout has just changed) reads as long ago, so it shows its state without gliding.
+inline float switchAge(ImGuiStorage& st, ImGuiID id, bool on, float now, int frame) {
+    const ImGuiID kv = ImHashData(&id, sizeof id, 0x5a11u), kt = ImHashData(&id, sizeof id, 0x5a12u), kf = ImHashData(&id, sizeof id, 0x5a13u);
+    const int seen = st.GetInt(kv, 0), want = on ? 2 : 1, last = st.GetInt(kf, -10);
+    st.SetInt(kf, frame);
+    if (!seen || last != frame - 1) { st.SetInt(kv, want); st.SetFloat(kt, now - kStill); return kStill; }
     if (seen != want) { st.SetInt(kv, want); st.SetFloat(kt, now); }
     return now - st.GetFloat(kt, now - kStill);
 }
@@ -129,9 +150,9 @@ inline void diamond(ImDrawList* dl, ImVec2 c, float half, const ImVec4& fill, fl
     }
     dl->AddQuadFilled(ImVec2(c.x, c.y - half), ImVec2(c.x + half, c.y), ImVec2(c.x, c.y + half), ImVec2(c.x - half, c.y), col(fill));
 }
-// ‹ (dir -1) or › (dir 1), 4 x 8 at the scale, 1.5 thick: the point toward dir.
-inline void chevron(ImDrawList* dl, ImVec2 c, int dir, const ImVec4& colr) {
-    const float s = ctx().s, w = -2 * s * dir, h = 4 * s;
+// ‹ (dir -1) or › (dir 1), 4 x 8 at the scale (or at `scale` when given), 1.5 thick: the point toward dir.
+inline void chevron(ImDrawList* dl, ImVec2 c, int dir, const ImVec4& colr, float scale = 0) {
+    const float s = scale > 0 ? scale : ctx().s, w = -2 * s * dir, h = 4 * s;
     const ImVec2 pts[3] = { ImVec2(c.x + w, c.y - h), ImVec2(c.x - w, c.y), ImVec2(c.x + w, c.y + h) };
     dl->AddPolyline(pts, 3, col(colr), ImDrawFlags_None, 1.5f * s);
 }
@@ -147,6 +168,55 @@ inline float spacedText(ImDrawList* dl, ImFont* f, float size, ImVec2 p, const c
         t += n;
     }
     return x - p.x - (x > p.x ? tracking * size : 0);
+}
+
+// Our own pointing glove, drawn from rounded rectangles and one line on a 40 x 24 grid scaled by `unit` from top left
+// `o`: cuff, palm, index finger, two curled fingers and thumb, each filled then outlined, then the line across the cuff.
+inline void glove(ImDrawList* dl, ImVec2 o, float unit) {
+    struct Part { float x, y, w, h, r; ImVec4 c; };
+    static const Part parts[] = {
+        { 1.5f, 6.5f, 6.5f, 12, 1.4f, rgba(0xcf, 0xd8, 0xe4, 1) },   // cuff
+        { 6.5f, 5, 15, 15.5f, 5.5f, rgba(0xff, 0xff, 0xff, 1) },     // palm
+        { 15.5f, 6, 23, 5.4f, 2.7f, rgba(0xff, 0xff, 0xff, 1) },     // index finger
+        { 15.5f, 11.6f, 10, 4.2f, 2.1f, rgba(0xf2, 0xf5, 0xfa, 1) }, // curled finger
+        { 15, 15.6f, 9, 4.2f, 2.1f, rgba(0xe6, 0xeb, 0xf2, 1) },     // curled finger
+        { 9, 3.6f, 10.5f, 4.6f, 2.3f, rgba(0xff, 0xff, 0xff, 1) },   // thumb
+    };
+    const ImU32 outline = col(rgba(0x26, 0x30, 0x3d, 1));
+    for (const Part& q : parts) {
+        const ImVec2 a(o.x + q.x * unit, o.y + q.y * unit), b(o.x + (q.x + q.w) * unit, o.y + (q.y + q.h) * unit);
+        dl->AddRectFilled(a, b, col(q.c), q.r * unit);
+        dl->AddRect(a, b, outline, q.r * unit, 0, 1.1f * unit);
+    }
+    dl->AddLine(ImVec2(o.x + 3.4f * unit, o.y + 9 * unit), ImVec2(o.x + 3.4f * unit, o.y + 16 * unit), col(rgba(0x9a, 0xa7, 0xb8, 1)), unit);
+}
+
+// The Portable mode switch's sizes in design pixels: the track (2 px corners), the knob (a square turned 45 degrees),
+// the knob centre's distance from the track's ends, the gap to the word and the word's fixed slot and text size.
+struct SwitchSize { float w, h, knob, end, gap, word; };
+constexpr SwitchSize kDeskSwitch{ 40, 18, 9, 9, 10, 28 }, kDeckSwitch{ 72, 32, 16, 15, 16, 60 };
+// The switch drawn with its track's left edge at x, centred on cy, at k screen pixels per design pixel; t is the knob's
+// place (knobAt). The track lights blue as the knob nears the On end. The word sits in its slot: nothing moves.
+inline void switchLook(ImDrawList* dl, float x, float cy, float k, const SwitchSize& z, bool on, float t, ImFont* f, float textPx) {
+    const ImVec2 a(x, std::floor(cy - z.h * 0.5f * k)), b(x + z.w * k, a.y + z.h * k);
+    const float r = 2 * k;
+    if (t > 0.001f) {  // the glow, faded in with the knob
+        for (int i = 3; i >= 1; --i)
+            dl->AddRect(ImVec2(a.x - i * k, a.y - i * k), ImVec2(b.x + i * k, b.y + i * k), col(rgba(79, 141, 255, 0.18f * t / i)), r + i * k, 0, k);
+    }
+    dl->AddRectFilled(a, b, col(rgba(255, 255, 255, .04f * (1 - t))), r);
+    if (t > 0.001f) {
+        const Stop lit[] = { { 0, rgba(79, 141, 255, .22f * t) }, { 1, rgba(79, 141, 255, .70f * t) } };
+        hgrad(dl, a.x + k, b.x - k, a.y + k, b.y - k, lit, 2);
+    }
+    const ImVec4 off = rgba(220, 230, 240, .7f), lit = rgba(0xcf, 0xe0, 0xff, 1);
+    const ImVec4 border(off.x + (lit.x - off.x) * t, off.y + (lit.y - off.y) * t, off.z + (lit.z - off.z) * t, off.w + (lit.w - off.w) * t);
+    dl->AddRect(a, b, col(border), r, 0, k);
+    const float kx = a.x + (z.end + (z.w - 2 * z.end) * t) * k, half = z.knob * 0.7071f * k;
+    const ImVec4 knobOff = rgba(0xb9, 0xc2, 0xcc, 1);
+    diamond(dl, ImVec2(kx, cy), half, ImVec4(knobOff.x + (1 - knobOff.x) * t, knobOff.y + (1 - knobOff.y) * t, knobOff.z + (1 - knobOff.z) * t, 1), t * 2 * k);
+    const char* word = on ? "On" : "Off";
+    dl->AddText(f, textPx, ImVec2(b.x + z.gap * k, cy - textPx * 0.5f), col(on ? kInk : kInk2), word);
 }
 
 // The panel: a near-black gradient fading to the right, the light streak with its glow along the top, and for the menu
@@ -185,9 +255,10 @@ inline void panel(ImDrawList* dl, ImVec2 a, ImVec2 b, Kind k, float fillEnd = FL
 inline float panelEnd(ImGuiWindow* win) {
     return win->ScrollbarY ? ImGui::GetWindowScrollbarRect(win, ImGuiAxis_Y).Min.x : win->Pos.x + win->Size.x;
 }
-// Thin corner brackets: the menu's four (16 px arms, 8 px in), the counter's top left and bottom right (9 px, 4 px in).
-inline void brackets(ImDrawList* dl, ImVec2 a, ImVec2 b, Kind k) {
-    const float s = ctx().s, arm = (k == kMenu ? 16 : 9) * s, in = (k == kMenu ? 8 : 4) * s, th = s;
+// Thin corner brackets: the menu's four (16 px arms, 8 px in, or armPx / inPx when given), the counter's top left and
+// bottom right (9 px, 4 px in).
+inline void brackets(ImDrawList* dl, ImVec2 a, ImVec2 b, Kind k, float armPx = 0, float inPx = 0) {
+    const float s = ctx().s, arm = (armPx > 0 ? armPx : k == kMenu ? 16 : 9) * s, in = (inPx > 0 ? inPx : k == kMenu ? 8 : 4) * s, th = s;
     const ImU32 c = col(rgba(205, 215, 228, .55f));
     auto corner = [&](float x, float y, float dx, float dy) {  // (x, y) the corner, (dx, dy) toward the inside
         dl->AddRectFilled(ImVec2(std::min(x, x + dx * arm), dy > 0 ? y : y - th), ImVec2(std::max(x, x + dx * arm), dy > 0 ? y + th : y), c);
@@ -217,8 +288,8 @@ inline void SeparatorText(const char* label) {
 }
 
 // Opens a row at the cursor: it is the selected row when it holds the nav rectangle while the nav cursor shows, else
-// when the mouse is over it. The selected row gets a blue band fading to the right, a small white diamond at its left
-// and a glowing underline, drawn now (behind the row's widgets), where the row is: nothing moves between rows.
+// when the mouse is over it. The selected row gets a blue band fading to the right, the pointing glove at its left
+// (swaying by ctx().bob) and a glowing underline, drawn now (behind the row's widgets), where the row is: nothing moves between rows.
 inline void row() {
     ImGuiContext& g = *GImGui;
     ImGuiWindow* w = g.CurrentWindow;
@@ -242,7 +313,7 @@ inline void row() {
     hgrad(dl, r.Min.x, ux, uy - 3 * s, uy, gl, 2, 0, 0.6f);
     hgrad(dl, r.Min.x, ux, uy + s, uy + 3 * s, gl, 2, 0.6f, 0);
     fadeRule(dl, r.Min.x, ux, uy, under, s);
-    diamond(dl, ImVec2(r.Min.x + 6 * s + 3.5f * s, (r.Min.y + r.Max.y) * 0.5f), 4.95f * s, kWhite, 2 * s);
+    glove(dl, ImVec2(r.Min.x - 6 * s + ctx().bob * s, (r.Min.y + r.Max.y) * 0.5f - 7.2f * s), 0.6f * s);
 }
 
 // The ‹ value › frame of an option row: ‹ and › in 22 px slots at the ends (mouse only: never navigation stops), and a
@@ -320,6 +391,41 @@ inline void toggleLook(bool on) {
     }
     const char* word = on ? "On" : "Off";
     dl->AddText(ImVec2(c.x + half + 10 * s, cy - ImGui::GetFontSize() * 0.5f), col(kInk2), word);
+}
+
+// The Portable mode switch: one navigable item over the track, the gap and the word's slot. A click on it, A, Space or
+// Enter while it has the focus flips `on`; left turns it off and right on. Disabled, it shows its state and takes
+// nothing. True when `on` changed.
+inline bool portable(const char* id, bool& on, bool enabled) {
+    const float s = ctx().s;
+    const SwitchSize& z = kDeskSwitch;
+    bool flipped = false;
+    ImGui::BeginDisabled(!enabled);
+    if (ImGui::InvisibleButton(id, ImVec2((z.w + z.gap + z.word) * s, ImGui::GetFrameHeight()), ImGuiButtonFlags_EnableNav)) { on = !on; flipped = true; }
+    if (enabled) flipped |= pad::padTick(on);
+    const ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
+    const float age = switchAge(*ImGui::GetStateStorage(), ImGui::GetItemID(), on, float(ImGui::GetTime()), ImGui::GetFrameCount());
+    switchLook(ImGui::GetWindowDrawList(), a.x, std::floor((a.y + b.y) * 0.5f), s, z, on, knobAt(on, age), ImGui::GetFont(), ImGui::GetFontSize());
+    ImGui::EndDisabled();
+    return flipped;
+}
+// Right after an item: it takes the keyboard and controller focus (without being pressed), with the nav cursor shown
+// when `cursor`, and is scrolled into view.
+inline void focusItem(bool cursor) {
+    ImGuiContext& g = *GImGui;
+    ImGui::SetWindowFocus();
+    ImGui::SetFocusID(g.LastItemData.ID, g.CurrentWindow);
+    g.NavInitRequest = false; g.NavInitResult.ID = 0;  // a window just appearing asks for its first item: not this time
+    ImGui::SetNavCursorVisible(cursor);
+    if (cursor) g.NavHighlightItemUnderNav = true;
+    ImGui::ScrollToItem();
+}
+// Called right after the desktop Portable mode switch: when the desktop menu has just taken over from the Deck layout
+// (pending), the switch takes the focus, its nav cursor shown when a controller has been used (cursor).
+inline void takeFocus(bool& pending, bool cursor) {
+    if (!pending) return;
+    pending = false;
+    focusItem(cursor);
 }
 
 // A typed slider's look, called right after pad::typedSlider: the hairline track with its fill and diamond knob over

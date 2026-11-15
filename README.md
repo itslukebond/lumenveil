@@ -171,8 +171,8 @@ With a controller, hold both sticks in (L3 and R3) for half a second to open or 
 stick to move, A to change a setting and B to close a list or the menu. On a Steam Deck this works without a keyboard.
 
 On a Steam Deck the menu switches to a larger layout with three pages; L1 and R1 change page. To use the normal menu,
-for example on a TV, set Layout to Desktop on the Overlay page. On another handheld, set Layout to Steam Deck at the
-bottom of the normal menu.
+for example on a TV, turn Portable mode off on the Overlay page. On another handheld, turn Portable mode on at the
+bottom of the normal menu. The menu switches at once.
 
 <p align="center">
   <img src="docs/images/menu.png" alt="The mod's menu in game: DLSS at Performance, DLSS Frame Generation at 2x, Reflex on" width="420">
@@ -191,7 +191,7 @@ bottom of the normal menu.
 | **Frame cap** | Off, Auto or Custom. Auto caps just under your display's refresh rate, so G-Sync, FreeSync or Adaptive Sync stays engaged. Pair it with V-Sync on in your driver's control panel. |
 | **Sharper HUD** | On by default. Crisper HUD text, icons and title screen at 4K, at a small cost in frame rate. Untick it for a little more fps. |
 | **FPS counter** | Show or hide the counter and pick its corner. It shows the fps you see and the base fps the game renders, the frame time of each in milliseconds, and a graph of the last two seconds of frame times. |
-| **Layout** | Automatic, Steam Deck or Desktop. Automatic uses the larger Steam Deck layout on a Steam Deck and the normal menu everywhere else. On another handheld, such as a ROG Ally or Legion Go, pick Steam Deck here. A change applies the next time the menu opens. |
+| **Portable mode** | On uses the larger Steam Deck layout; Off the normal menu. Until you flip it, the mod picks: on for a Steam Deck, off elsewhere. On another handheld, such as a ROG Ally or Legion Go, turn it on. The menu switches at once. |
 
 <p align="center">
   <img src="docs/images/fps-counter.png" alt="The fps counter: 222 fps shown, 111 rendered, frame generation 2x, RTX 5090, DLSS 310.9.16" width="420">
