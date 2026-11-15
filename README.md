@@ -179,7 +179,7 @@ elsewhere. On another handheld, such as a ROG Ally or Legion Go, pick Portable; 
 The menu switches at once and remembers your pick.
 
 <p align="center">
-  <img src="docs/images/menu.png" alt="The mod's menu in game: DLSS at Performance, DLSS Frame Generation at 2x, Reflex on" width="420">
+  <img src="docs/images/menu.png" alt="The mod's menu in game on its Upscaling page: Auto picks DLSS, Performance mode, frame generation at 2x" width="420">
 </p>
 
 | Setting | What it does |
@@ -197,7 +197,7 @@ The menu switches at once and remembers your pick.
 | **FPS counter** | Show or hide the counter and pick its corner. It shows the fps you see and the base fps the game renders, the frame time of each in milliseconds, and a graph of the last two seconds of frame times. |
 
 <p align="center">
-  <img src="docs/images/fps-counter.png" alt="The fps counter: 222 fps shown, 111 rendered, frame generation 2x, RTX 5090, DLSS 310.9.16" width="420">
+  <img src="docs/images/fps-counter.png" alt="The fps counter: 50 fps shown, 25 rendered, frame generation 2x, RTX 2000 Ada, DLSS 310.9.16" width="300">
 </p>
 
 The scaling mode is written to `RenderingResolutionRatio` in the game's
