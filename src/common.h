@@ -55,7 +55,8 @@ void dlssRequestShot(const char* tag);
 void shotBackbuffer(ID3D11DeviceContext* ctx, ID3D11Resource* bb, const char* tag);
 
 // main.cpp
-void uiToggle();
+bool uiSharp();                  // Sharper HUD ([ui] sharp)
+void uiSetSharp(bool on);
 
 // glyph2x.cpp: 2048² R8 letter atlas from the game's 1024² BC4 one (mip 0 blocks) and the .otf; empty if the font fails
 std::vector<unsigned char> buildGlyph2x(const unsigned char* bc4, const std::vector<unsigned char>& font);

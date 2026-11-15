@@ -187,6 +187,7 @@ for example on a TV, set Layout to Desktop on the Overlay page.
 | **Frame Generation** | Off, a fixed 2x or higher, or Dynamic with a target fps. The menu lists what your card and DLSS file can do: 2x on RTX 40 cards, up to 6x on RTX 50. FSR and XeSS generate 2x. After the first save loads, frame generation waits about 20 seconds before it starts. |
 | **Reflex** | Off, On, or On + Boost, with DLSS Frame Generation. Frame Generation keeps Reflex on. With XeSS Frame Generation this section is Intel's Xe Low Latency instead, which stays on while frame generation is enabled. On an AMD Radeon card with FSR, it is AMD Radeon Anti-Lag 2 instead, Off or On, off by default. |
 | **Frame cap** | Off, Auto or Custom. Auto caps just under your display's refresh rate, so G-Sync, FreeSync or Adaptive Sync stays engaged. Pair it with V-Sync on in your driver's control panel. |
+| **Sharper HUD** | On by default. Crisper HUD text, icons and title screen at 4K, at a small cost in frame rate. Untick it for a little more fps. |
 | **FPS counter** | Show or hide the counter and pick its corner. It shows the fps you see and the base fps the game renders. |
 | **Layout** | Automatic, Steam Deck or Desktop. Automatic uses the larger Steam Deck layout on a Steam Deck and the normal menu everywhere else. The normal menu shows this setting only on a Steam Deck or once it is not Automatic; on another handheld, put `layout=1` under `[overlay]` in `ffxv_dlss.ini`. A change applies the next time the menu opens. |
 

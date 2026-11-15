@@ -954,6 +954,14 @@ void drawMenu() {
         iniSet(L"fg", L"reflex", fs.reflex); iniSet(L"fg", L"antilag", fs.antilag);
     }
 
+    ImGui::SeparatorText("HUD");
+    label("Sharper HUD");
+    bool hudSharp = uiSharp();
+    bool sharpFlip = ImGui::Checkbox("##sharp", &hudSharp);
+    sharpFlip |= pad::padTick(hudSharp);
+    if (sharpFlip) { uiSetSharp(hudSharp); iniSet(L"ui", L"sharp", hudSharp); }
+    ImGui::TextDisabled("Crisper HUD text, icons and title screen. Costs a little frame rate at 4K.");
+
     ImGui::SeparatorText("Overlay");
     label("FPS counter");
     bool counterFlip = ImGui::Checkbox("##counter", &g_counter);
