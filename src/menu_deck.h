@@ -1,8 +1,9 @@
 // The Insert menu's Steam Deck layout, kept free of Windows types so tests/menu_deck_test.cpp covers it on the host:
-// detection, the Layout setting, the controller's steps and focus, and the widgets. The layout is the signed-off
-// 1280x800 design (a 760x768 panel: logo, tab bar with L1 / R1, one page of 66 px rows, footer), drawn at
-// min(width / 1280, height / 800) and centred. Each row is one invisible button with a fixed rect drawn through the
-// draw list, so rows never move, and a dimmed row keeps its place but takes no input.
+// detection, the Layout setting and its live change (Portable mode), the controller's steps and focus, and the widgets.
+// The layout is the signed-off 1280x800 design (a 760x768 panel: logo, tab bar with L1 / R1, one page of 66 px rows,
+// footer), drawn at min(width / 1280, height / 800) and centred, in the desktop menu's look (menu_look.h) at its own
+// sizes. Each row is one invisible button with a fixed rect drawn through the draw list, so rows never move, and a
+// dimmed row keeps its place but takes no input.
 #pragma once
 #include <algorithm>
 #include <cmath>
@@ -11,6 +12,7 @@
 #include <cstring>
 #include "imgui.h"
 #include "imgui_internal.h"  // ImRect, ClearActiveID
+#include "menu_look.h"       // the desktop look: panel, brackets, glove, tick box and switch animation
 #include "menu_pad.h"        // typedValue
 
 namespace deck {
@@ -30,6 +32,19 @@ inline const char* foundBy(uint32_t vendor, uint32_t device, const char* steamDe
 inline int layoutValue(int raw) { return raw == 1 || raw == 2 ? raw : 0; }
 inline bool deckLayoutOn(int setting, bool deck) { return setting == 1 ? true : setting == 2 ? false : deck; }
 inline float deckScale(float w, float h) { return std::min(w / 1280.f, h / 800.f); }
+
+// A layout change asked by the Portable mode switch: it lands 0.38 s after the flip (the knob finishes gliding first);
+// flipping back before then cancels it. want: -1 nothing pending, else 1 (the Deck layout) or 0 (the desktop menu).
+struct Swap {
+    int want = -1;
+    double at = 0;
+    void flip(bool on, double now, bool current) {
+        if (on == current) { want = -1; return; }
+        want = on ? 1 : 0; at = now + 0.38;
+    }
+    bool shown(bool current) const { return want < 0 ? current : want == 1; }  // the switch's state on screen
+    bool due(double now) const { return want >= 0 && now >= at; }
+};
 
 // A list's next index, wrapping both ways.
 inline int wrapStep(int i, int n, int dir) { return n > 0 ? ((i + dir) % n + n) % n : 0; }
@@ -51,11 +66,17 @@ struct Nav {
     void turn(int dir) { page = wrapStep(page, 3, dir); }
 };
 constexpr int kRows[3] = { 4, 5, 3 };  // focusable rows on Upscaling, Frame generation and Overlay
+// Where a Portable mode change lands, once compose has set the new layout: the Deck layout opens on its Overlay page
+// with Portable mode (its third row) focused; the desktop menu is told to focus its switch (focusDesk).
+inline void landFocus(bool deckOpen, Nav& nav, bool& focusDesk) {
+    if (deckOpen) { nav.page = 2; nav.focus[2] = 2; }
+    else focusDesk = true;
+}
 
 // ---- drawing ---------------------------------------------------------------------------------------------------------
 // The design's geometry, in its pixels from the panel's top left.
 constexpr float kPanelW = 760, kPanelH = 768;
-constexpr float kTabTop = 82, kTabBottom = 142, kBodyTop = 156, kFootTop = 704;
+constexpr float kTabTop = 84, kTabBottom = 140, kBodyTop = 140, kFootTop = 636;
 constexpr float kRowL = 20, kRowR = 740, kRowH = 66, kCtlL = 310, kCtlR = 728, kArrowW = 56, kBoxW = 104, kTrackR = 610;
 
 const ImVec4 kText(0.918f, 0.929f, 0.949f, 1), kDim(0.549f, 0.580f, 0.631f, 1), kGreen(0.620f, 0.902f, 0.200f, 1),
@@ -65,8 +86,8 @@ struct Look {
     ImVec2 o;                     // the panel's top left on screen
     float k = 1;                  // screen pixels per design pixel
     ImFont *label, *value, *caption;  // 26, 24 and 19 px in the design
-    ImVec4 acc{ 0.59f, 0.62f, 0.67f, 1 }, accHi{ 0.83f, 0.85f, 0.88f, 1 };  // this row's accent
     float y = kBodyTop;           // the body's next free line
+    float sWas = 1;               // look::ctx().s outside the panel, put back by end
     static Look at(float w, float h, ImFont* label, ImFont* value, ImFont* caption) {
         Look L;
         L.k = deckScale(w, h);
@@ -113,24 +134,52 @@ inline void begin(Look& L) {
     ImGui::SetNextWindowPos(L.o, ImGuiCond_Always);
     ImGui::SetNextWindowSize(ImVec2(kPanelW * L.k, kPanelH * L.k), ImGuiCond_Always);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 6 * L.k);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0);
     ImGui::PushStyleVar(ImGuiStyleVar_DisabledAlpha, 0.42f);
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(22 / 255.f, 24 / 255.f, 29 / 255.f, 0.94f));
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0, 0, 0, 0));
     ImGui::Begin("##deck", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
-                                    ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoFocusOnAppearing);
+                                    ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoBackground);
     L.y = kBodyTop;
+    L.sWas = look::ctx().s;
+    look::ctx().s = L.k;  // the look's helpers draw at the Deck's scale
+    // the desktop menu's panel: the gradient, the streak with its glow (reaching above the panel), the bottom line and
+    // the corner brackets (22 px arms, 10 px in)
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImVec2 a = L.p(0, 0), b = L.p(kPanelW, kPanelH);
+    ImGui::PushClipRect(ImVec2(a.x, a.y - 6 * L.k), b, false);
+    look::panel(dl, a, b, look::kMenu);
+    ImGui::PopClipRect();
+    look::brackets(dl, a, b, look::kMenu, 22, 10);
 }
-inline void end(Look&) {
+inline void end(Look& L) {
+    look::ctx().s = L.sWas;
     ImGui::End();
     ImGui::PopStyleColor();
     ImGui::PopStyleVar(4);
 }
 
-// The logo, 64 design pixels tall, centred in the top 76.
+// The logo, 58 design pixels tall, centred, 20 below the panel's top.
 inline void logo(const Look& L, ImTextureID tex, float aspect) {
-    const float h = 64, w = h * aspect;
-    ImGui::GetWindowDrawList()->AddImage(tex, L.p((kPanelW - w) * 0.5f, 8), L.p((kPanelW + w) * 0.5f, 8 + h));
+    const float h = 58, w = h * aspect;
+    ImGui::GetWindowDrawList()->AddImage(tex, L.p((kPanelW - w) * 0.5f, 20), L.p((kPanelW + w) * 0.5f, 20 + h));
+}
+
+// Spaced capitals: text upper-cased with extra space after each letter, in font f at px design pixels; returns the width
+// in design pixels. Measures only when dl is null.
+inline float caps(const Look& L, ImDrawList* dl, ImFont* f, float px, float x, float y, const char* name, float tracking, const ImVec4& c) {
+    char up[64]; size_t i = 0;
+    for (; name[i] && i + 1 < sizeof up; ++i) up[i] = name[i] >= 'a' && name[i] <= 'z' ? char(name[i] - 32) : name[i];
+    up[i] = 0;
+    return look::spacedText(dl, f, px * L.k, L.p(x, y), up, tracking, c) / L.k;
+}
+// A key badge (square, 2 px corners) with its name in 15 px, 28 high, at least 40 wide; returns its width.
+inline float badge(const Look& L, float x, float y, const char* name) {
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const float tw = L.caption->CalcTextSizeA(15 * L.k, FLT_MAX, 0, name).x / L.k, w = std::max(40.f, tw + 14);
+    dl->AddRect(L.p(x, y), L.p(x + w, y + 28), col(ImVec4(205 / 255.f, 215 / 255.f, 228 / 255.f, .5f)), 2 * L.k, 0, std::max(1.0f, L.k));
+    text(L, L.caption, 15, x, y + (28 - 15) * 0.5f - 1, w, look::kWhite, name, 0.5f);
+    return w;
 }
 
 // The tab bar: L1, the three pages, R1. Returns the page to show: a pressed tab's, the one before (L1) or after (R1)
@@ -139,17 +188,20 @@ inline int tabs(const Look& L, int page, const char* const* names) {
     static const char* const kNames[3] = { "Upscaling", "Frame generation", "Overlay" };
     if (!names) names = kNames;
     ImDrawList* dl = ImGui::GetWindowDrawList();
-    dl->AddLine(L.p(kRowL, kTabBottom), L.p(kRowR, kTabBottom), col(ImVec4(1, 1, 1, 0.08f)), std::max(1.0f, L.k));
+    dl->AddRectFilled(L.p(30, kTabBottom - 1), L.p(kPanelW - 30, kTabBottom), col(ImVec4(205 / 255.f, 215 / 255.f, 228 / 255.f, .12f)));
     int to = page;
     auto hit = [&](const char* id, float x0, float x1) {
         ImGui::SetCursorScreenPos(L.p(x0, kTabTop));
         return ImGui::InvisibleButton(id, ImVec2((x1 - x0) * L.k, (kTabBottom - kTabTop) * L.k), ImGuiButtonFlags_PressedOnClick);
     };
     auto glyph = [&](const char* g, float cx) {
-        const float w = 46, h = 32, y = (kTabTop + kTabBottom - h) * 0.5f;
-        dl->AddRectFilled(L.p(cx - w / 2, y), L.p(cx + w / 2, y + h), col(ImVec4(1, 1, 1, 0.04f)), 4 * L.k);
-        dl->AddRect(L.p(cx - w / 2, y), L.p(cx + w / 2, y + h), col(ImVec4(0.42f, 0.45f, 0.50f, 1)), 4 * L.k, 0, 2 * L.k);
-        text(L, L.caption, 17, cx - w / 2, y + (h - 17) * 0.5f - 1, w, ImVec4(0.81f, 0.84f, 0.87f, 1), g, 0.5f);
+        const float w = std::max(40.f, L.caption->CalcTextSizeA(15 * L.k, FLT_MAX, 0, g).x / L.k + 14);
+        badge(L, cx - w / 2, (kTabTop + kTabBottom - 28) * 0.5f, g);
+    };
+    // the names in 17 px spaced capitals, a name's spacing narrowed only as far as it needs to fit its tab
+    auto tracking = [&](const char* name) {
+        const float w = caps(L, nullptr, L.caption, 17, 0, 0, name, 0, kText), n = float(std::strlen(name) - 1);
+        return n > 0 && w + n * 0.2f * 17 > 192 ? std::max(0.f, (192 - w) / (n * 17)) : 0.2f;
     };
     if (hit("##l1", kRowL, kRowL + 60)) to = wrapStep(page, 3, -1);
     glyph("L1", kRowL + 30);
@@ -158,28 +210,39 @@ inline int tabs(const Look& L, int page, const char* const* names) {
         ImGui::PushID(i);
         if (hit("##tab", x0, x1)) to = i;
         ImGui::PopID();
-        text(L, L.value, 24, x0, (kTabTop + kTabBottom - 24) * 0.5f, 200, i == page ? kText : kDim, names[i], 0.5f);
-        if (i == page) dl->AddRectFilled(L.p(x0 + 24, kTabBottom - 3), L.p(x1 - 24, kTabBottom + 1), col(L.accHi));
+        const float track = tracking(names[i]), w = caps(L, nullptr, L.caption, 17, 0, 0, names[i], track, kText), cx = (x0 + x1) * 0.5f;
+        caps(L, dl, L.caption, 17, cx - w * 0.5f, (kTabTop + kTabBottom - 17) * 0.5f - 1, names[i], track, i == page ? look::kWhite : look::kDim);
+        if (i == page) {  // a short streak under the active tab, with its glow
+            const look::Stop st[] = { { 0, look::alpha(look::kStreak, 0) }, { .2f, look::kStreak }, { .5f, look::kStreakHi }, { .8f, look::kStreak }, { 1, look::alpha(look::kStreak, 0) } };
+            const look::Stop gl[] = { { 0, look::rgba(79, 141, 255, 0) }, { .5f, look::rgba(79, 141, 255, .6f) }, { 1, look::rgba(79, 141, 255, 0) } };
+            const ImVec2 a = L.p(cx - 28, kTabBottom - 1), b = L.p(cx + 28, kTabBottom + 1);
+            look::hgrad(dl, a.x - 4 * L.k, b.x + 4 * L.k, a.y - 4 * L.k, a.y, gl, 3, 0, 0.6f);
+            look::hgrad(dl, a.x - 4 * L.k, b.x + 4 * L.k, b.y, b.y + 4 * L.k, gl, 3, 0.6f, 0);
+            look::hgrad(dl, a.x, b.x, a.y, b.y, st, 5);
+        }
     }
     if (hit("##r1", kRowR - 60, kRowR)) to = wrapStep(page, 3, 1);
     glyph("R1", kRowR - 30);
     return to;
 }
 
-// A heading in the body.
+// A heading in the body: 16 px spaced capitals in a 22 px line, 14 above (8 at the top of the page) and 6 below, then a
+// rule fading out toward the right.
 inline void section(Look& L, const char* name) {
-    L.y += 10;
-    char up[64]; size_t i = 0;
-    for (; name[i] && i + 1 < sizeof up; ++i) up[i] = name[i] >= 'a' && name[i] <= 'z' ? char(name[i] - 32) : name[i];
-    up[i] = 0;
-    text(L, L.caption, 18, kRowL + 4, L.y + 3, kRowR - kRowL - 8, kDim, up);
-    L.y += 24 + 6;
+    L.y += L.y <= kBodyTop ? 8 : 14;
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const float w = caps(L, dl, L.caption, 16, 30, L.y + (22 - 16) * 0.5f - 1, name, 0.22f, look::kInk2);
+    look::fadeRule(dl, L.p(30 + w + 12, 0).x, L.p(kPanelW - 30, 0).x, std::floor(L.p(0, L.y + 11).y), look::kRule, std::max(1.0f, L.k));
+    L.y += 22 + 6;
 }
-// One line under a row, shortened to fit.
+// One line under a row, 28 high, 48 px into the row, shortened to fit the panel's padding.
 inline void status(Look& L, const char* s, const ImVec4& c) {
     L.y -= 2;
-    text(L, L.caption, 19, kRowL + 20, L.y + (30 - 19) * 0.5f - 1, kRowR - kRowL - 24, c, s);
-    L.y += 30 + 6;
+    // a line a little too long for the font at 19 px is set smaller, down to 17 px, before it is shortened
+    const float maxW = kPanelW - 30 - (kRowL + 48), w = L.caption->CalcTextSizeA(19 * L.k, FLT_MAX, 0, s).x / L.k;
+    const float px = w > maxW ? std::max(17.f, std::floor(190 * maxW / w) / 10) : 19;
+    text(L, L.caption, px, kRowL + 48, L.y + (28 - px) * 0.5f - 1, maxW, c, s);
+    L.y += 28 + 4;
 }
 
 // A row's input: whether the controller's focus is on it, whether it is dimmed, and this frame's controller action
@@ -189,14 +252,24 @@ struct RowIn { bool focused = false, dim = false; int lr = 0; bool a = false; };
 struct RowOut { bool press = false; int step = 0; };
 
 // The row's background, focus bar and label; the row's button is added by rowButton after the row's own controls.
+// The focused row: the desktop's blue band fading to the right, its glowing underline (to 85 % of the row) and the
+// pointing glove 2 px into the row, swaying by look::ctx().bob. Then the label, 48 px in.
 inline void rowFrame(const Look& L, const char* label, const RowIn& in) {
     ImDrawList* dl = ImGui::GetWindowDrawList();
-    const float y = L.y;
+    const float y = L.y, k = L.k;
     if (in.focused) {
-        dl->AddRectFilled(L.p(kRowL, y), L.p(kRowR, y + kRowH), col(L.acc, 0.26f), 4 * L.k);
-        dl->AddRectFilled(L.p(kRowL, y + 8), L.p(kRowL + 5, y + kRowH - 8), col(L.accHi), 2 * L.k, ImDrawFlags_RoundCornersRight);
-    } else dl->AddRectFilled(L.p(kRowL, y), L.p(kRowR, y + kRowH), col(ImVec4(1, 1, 1, 0.035f)), 4 * L.k);
-    text(L, L.label, 26, kRowL + 20, y + (kRowH - 26) * 0.5f - 1, kCtlL - kRowL - 24, kText, label);
+        const ImVec2 a = L.p(kRowL, y), b = L.p(kRowR, y + kRowH);
+        const look::Stop band[] = { { 0, look::kSel }, { .55f, look::rgba(110, 160, 255, .07f) }, { 1, look::rgba(110, 160, 255, 0) } };
+        look::hgrad(dl, a.x, b.x, a.y, b.y, band, 3);
+        const float ux = a.x + (b.x - a.x) * 0.85f, uy = b.y - k;
+        const ImVec4 glow = look::rgba(120, 170, 255, .7f);
+        const look::Stop gl[] = { { 0, look::alpha(glow, .5f) }, { 1, look::alpha(glow, 0) } };
+        look::hgrad(dl, a.x, ux, uy - 4 * k, uy, gl, 2, 0, 0.6f);
+        look::hgrad(dl, a.x, ux, uy + k, uy + 4 * k, gl, 2, 0.6f, 0);
+        look::fadeRule(dl, a.x, ux, uy, look::rgba(0xa9, 0xc8, 0xff, 1), k);
+        look::glove(dl, L.p(kRowL + 2 + look::ctx().bob, y + kRowH * 0.5f - 10.8f), 0.9f * k);
+    }
+    text(L, L.label, 26, kRowL + 48, y + (kRowH - 26) * 0.5f - 1, kCtlL - kRowL - 52, look::kInk, label);
 }
 // The whole row as one button (last, so the row's own controls take a press first). True on the frame it is pressed;
 // the item is the row, so GetItemRect gives the row's rect.
@@ -214,10 +287,11 @@ inline RowOut cycler(Look& L, const char* id, const char* label, const char* val
     rowFrame(L, label, in);
     const float y = L.y, t = y + (kRowH - 52) * 0.5f;
     ImDrawList* dl = ImGui::GetWindowDrawList();
-    for (float x0 : { kCtlL, kCtlR - kArrowW }) dl->AddRectFilled(L.p(x0, t), L.p(x0 + kArrowW, t + 52), col(L.acc, 0.30f), 4 * L.k);
-    arrow(L, kCtlL, t, kCtlL + kArrowW, t + 52, -1, kText);
-    arrow(L, kCtlR - kArrowW, t, kCtlR, t + 52, 1, kText);
-    text(L, L.value, 24, kCtlL + kArrowW + 10, y + (kRowH - 24) * 0.5f - 1, kCtlR - kCtlL - 2 * kArrowW - 20, kText, value, 0.5f);
+    // ‹ and › centred in their slots, white on the focused row, then the value centred between them
+    const ImVec4 ar = in.focused ? look::kWhite : look::kDim;
+    look::chevron(dl, L.p(kCtlL + kArrowW * 0.5f, y + kRowH * 0.5f), -1, ar, 1.75f * L.k);
+    look::chevron(dl, L.p(kCtlR - kArrowW * 0.5f, y + kRowH * 0.5f), 1, ar, 1.75f * L.k);
+    text(L, L.value, 24, kCtlL + kArrowW + 6, y + (kRowH - 24) * 0.5f - 1, kCtlR - kCtlL - 2 * kArrowW - 12, look::kInk, value, 0.5f);
     if (rowButton(L, id)) {
         out.press = true;
         const ImVec2 at = pressAt(L);
@@ -225,7 +299,7 @@ inline RowOut cycler(Look& L, const char* id, const char* label, const char* val
     }
     ImGui::EndDisabled();
     if (!in.dim && in.focused && !out.press) out.step = in.lr ? in.lr : in.a ? 1 : 0;
-    L.y += kRowH + 4;
+    L.y += kRowH + 2;
     return out;
 }
 
@@ -234,18 +308,47 @@ inline RowOut toggle(Look& L, const char* id, const char* label, bool on, RowIn 
     RowOut out;
     ImGui::BeginDisabled(in.dim);
     rowFrame(L, label, in);
-    const float y = L.y, t = y + (kRowH - 52) * 0.5f;
+    const float y = L.y, k = L.k, cy = std::floor(L.p(0, y + kRowH * 0.5f).y);
     ImDrawList* dl = ImGui::GetWindowDrawList();
-    dl->AddRectFilled(L.p(kCtlL, t), L.p(kCtlL + 52, t + 52), col(ImVec4(1, 1, 1, 0.08f)), 4 * L.k);
-    if (on) {
-        const ImVec2 pts[3] = { L.p(kCtlL + 14, t + 27), L.p(kCtlL + 22, t + 36), L.p(kCtlL + 39, t + 16) };
-        dl->AddPolyline(pts, 3, col(L.accHi), ImDrawFlags_None, 4 * L.k);
+    // the desktop's square box at 28 (inner 14): the inner square grows in with a pulse ring when on, shrinks out when off
+    const float age = look::toggleAge(*ImGui::GetStateStorage(), ImGui::GetID(id), on, float(ImGui::GetTime()));
+    const float half = 14 * k;
+    const ImVec2 c(L.p(kCtlL, 0).x + half, cy);
+    dl->AddRect(ImVec2(c.x - half, c.y - half), ImVec2(c.x + half, c.y + half), col(on ? look::rgba(0xcf, 0xe0, 0xff, 1) : look::rgba(220, 230, 240, .7f)), 0, 0, std::max(1.0f, k));
+    const look::Anim inner = look::toggleInner(on, age);
+    if (inner.alpha > 0.001f) {
+        const float q = 7 * k * inner.scale;
+        dl->AddRectFilled(ImVec2(c.x - q - 3 * k, c.y - q - 3 * k), ImVec2(c.x + q + 3 * k, c.y + q + 3 * k), col(look::rgba(150, 190, 255, .25f * inner.alpha)));
+        dl->AddRectFilled(ImVec2(c.x - q, c.y - q), ImVec2(c.x + q, c.y + q), col(look::alpha(look::kWhite, inner.alpha)));
     }
-    text(L, L.value, 22, kCtlL + 52 + 16, y + (kRowH - 22) * 0.5f - 1, 80, kDim, on ? "On" : "Off");
+    if (on) {
+        const look::Anim p = look::pulse(age);
+        if (p.alpha > 0.001f) {
+            const float r = (half + k) * p.scale;
+            dl->AddRect(ImVec2(c.x - r, c.y - r), ImVec2(c.x + r, c.y + r), col(look::rgba(140, 185, 255, p.alpha)), 0, 0, std::max(1.0f, k));
+        }
+    }
+    text(L, L.value, 22, kCtlL + 28 + 16, y + (kRowH - 22) * 0.5f - 1, 60, look::kInk2, on ? "On" : "Off");
     if (rowButton(L, id)) { out.press = true; out.step = 1; }
     ImGui::EndDisabled();
     if (!in.dim && in.focused && !out.press && (in.lr || in.a)) out.step = 1;
-    L.y += kRowH + 4;
+    L.y += kRowH + 2;
+    return out;
+}
+
+// The Portable mode switch (72 x 32 track, 16 px knob, the word in a 60 px slot at 22 px), with a tick box's input:
+// a press on the row, left / right or A flips it (step +1).
+inline RowOut portableRow(Look& L, const char* id, const char* label, bool on, RowIn in) {
+    RowOut out;
+    ImGui::BeginDisabled(in.dim);
+    rowFrame(L, label, in);
+    const float age = look::switchAge(*ImGui::GetStateStorage(), ImGui::GetID(id), on, float(ImGui::GetTime()), ImGui::GetFrameCount());
+    look::switchLook(ImGui::GetWindowDrawList(), L.p(kCtlL, 0).x, std::floor(L.p(0, L.y + kRowH * 0.5f).y), L.k, look::kDeckSwitch, on,
+                     look::knobAt(on, age), L.value, 22 * L.k);
+    if (rowButton(L, id)) { out.press = true; out.step = 1; }
+    ImGui::EndDisabled();
+    if (!in.dim && in.focused && !out.press && (in.lr || in.a)) out.step = 1;
+    L.y += kRowH + 2;
     return out;
 }
 
@@ -272,10 +375,16 @@ inline bool slider(Look& L, const char* id, const char* label, int& v, int lo, i
     rowFrame(L, label, in);
     const float y = L.y, t = y + (kRowH - 52) * 0.5f, bx = kCtlR - kBoxW;
     ImDrawList* dl = ImGui::GetWindowDrawList();
-    const float f = hi > lo ? float(v - lo) / float(hi - lo) : 0, gx = kCtlL + (kTrackR - kCtlL) * f, cy = y + kRowH * 0.5f;
-    dl->AddRectFilled(L.p(kCtlL, cy - 5), L.p(kTrackR, cy + 5), col(ImVec4(1, 1, 1, 0.12f)), 3 * L.k);
-    dl->AddRectFilled(L.p(kCtlL, cy - 5), L.p(gx, cy + 5), col(L.acc), 3 * L.k);
-    dl->AddRectFilled(L.p(gx - 12, cy - 22), L.p(gx + 12, cy + 22), col(L.accHi), 4 * L.k);
+    const float f = hi > lo ? std::clamp(float(v - lo) / float(hi - lo), 0.f, 1.f) : 0, gx = kCtlL + (kTrackR - kCtlL) * f, cy = y + kRowH * 0.5f;
+    {  // the hairline track, its fill and the diamond knob (an 18 px square turned 45 degrees)
+        const float sy = std::floor(L.p(0, cy).y), x0 = L.p(kCtlL, 0).x, x1 = L.p(kTrackR, 0).x, kx = L.p(gx, 0).x;
+        dl->AddRectFilled(ImVec2(x0, sy - L.k), ImVec2(x1, sy + L.k), col(look::rgba(205, 215, 228, .25f)));
+        if (kx > x0) {
+            const look::Stop fill[] = { { 0, look::rgba(0x6f, 0x9d, 0xff, 1) }, { 1, look::rgba(0xe4, 0xef, 0xff, 1) } };
+            look::hgrad(dl, x0, kx, sy - L.k, sy + L.k, fill, 2);
+        }
+        look::diamond(dl, ImVec2(kx, sy), 12.73f * L.k, look::kWhite, 3 * L.k);
+    }
     // the box: typed in, or showing the value
     if (typing.id == rid && !in.dim) {
         ImGui::SetCursorScreenPos(L.p(bx, t));
@@ -299,11 +408,12 @@ inline bool slider(Look& L, const char* id, const char* label, int& v, int lo, i
         ImGui::PopFont();
         ImGui::SetWindowFontScale(1);
     } else {
-        dl->AddRectFilled(L.p(bx, t), L.p(kCtlR, t + 52), col(ImVec4(0, 0, 0, 0.25f)), 4 * L.k);
-        dl->AddRect(L.p(bx, t), L.p(kCtlR, t + 52), col(ImVec4(0.29f, 0.32f, 0.36f, 1)), 4 * L.k, 0, std::max(1.0f, L.k));
+        // the number box, 104 x 44 in the 52 high place it takes presses in
+        dl->AddRectFilled(L.p(bx, t + 4), L.p(kCtlR, t + 48), col(look::rgba(255, 255, 255, .04f)), 2 * L.k);
+        dl->AddRect(L.p(bx, t + 4), L.p(kCtlR, t + 48), col(look::kRule), 2 * L.k, 0, std::max(1.0f, L.k));
         char s[24];
         std::snprintf(s, sizeof s, "%d%s", v, unit);
-        text(L, L.value, 24, bx + 4, y + (kRowH - 24) * 0.5f - 1, kBoxW - 8, kText, s, 0.5f);
+        text(L, L.value, 22, bx + 4, y + (kRowH - 22) * 0.5f - 1, kBoxW - 8, look::kInk, s, 0.5f);
         ImGui::SetCursorScreenPos(L.p(bx, t));
         if (ImGui::InvisibleButton("##num", ImVec2(kBoxW * L.k, 52 * L.k), ImGuiButtonFlags_PressedOnClick)) {
             out.press = true;
@@ -327,34 +437,30 @@ inline bool slider(Look& L, const char* id, const char* label, int& v, int lo, i
         else if (in.a) typing = Typing{ rid, true, false, 0 };
     }
     ImGui::PopID();
-    L.y += kRowH + 4;
+    L.y += kRowH + 2;
     if (outp) *outp = out;
     return v != before;
 }
 
-// The footer: the controller's buttons and what they do, and a note on the right.
-inline void footer(const Look& L, const char* note) {
+// The footer, upward from the panel's 34 px bottom padding: a faint rule at kFootTop; the controller's buttons in square
+// badges with what they do; "Touch works too. Changes apply and save immediately." with `version` right-aligned on that
+// line; then 8 px lower the trademark line at 15 px.
+inline void footer(const Look& L, const char* version) {
     ImDrawList* dl = ImGui::GetWindowDrawList();
-    dl->AddLine(L.p(0, kFootTop), L.p(kPanelW, kFootTop), col(ImVec4(1, 1, 1, 0.08f)), std::max(1.0f, L.k));
-    const float cy = kFootTop + 32, gh = 32;
-    float x = 24;
-    auto badge = [&](const char* g, float w, bool round) {
-        const ImVec2 a = L.p(x, cy - gh / 2), b = L.p(x + w, cy + gh / 2);
-        dl->AddRectFilled(a, b, col(ImVec4(1, 1, 1, 0.04f)), round ? gh * 0.5f * L.k : 4 * L.k);
-        dl->AddRect(a, b, col(ImVec4(0.42f, 0.45f, 0.50f, 1)), round ? gh * 0.5f * L.k : 4 * L.k, 0, 2 * L.k);
-        if (g) text(L, L.caption, 17, x, cy - 17 * 0.5f - 1, w, ImVec4(0.81f, 0.84f, 0.87f, 1), g, 0.5f);
-        else { arrow(L, x + 4, cy - 12, x + w / 2, cy + 12, -1, kText); arrow(L, x + w / 2, cy - 12, x + w - 4, cy + 12, 1, kText); }
-        x += w + 8;
+    dl->AddRectFilled(L.p(30, kFootTop), L.p(kPanelW - 30, kFootTop + 1), col(ImVec4(205 / 255.f, 215 / 255.f, 228 / 255.f, .12f)));
+    const float ky = kFootTop + 10;
+    float x = 30;
+    auto key = [&](const char* name, const char* word) {
+        x += badge(L, x, ky, name) + 10;
+        text(L, L.caption, 19, x, ky + (28 - 19) * 0.5f - 1, 200, look::kInk2, word);
+        x += L.caption->CalcTextSizeA(19 * L.k, FLT_MAX, 0, word).x / L.k + 26;
     };
-    auto word = [&](const char* s) {
-        text(L, L.caption, 19, x, cy - 19 * 0.5f - 1, 160, kDim, s);
-        x += L.caption->CalcTextSizeA(19 * L.k, FLT_MAX, 0, s).x / L.k + 22;
-    };
-    badge("A", 34, true); word("Select");
-    badge("B", 34, true); word("Close");
-    badge(nullptr, 62, false); word("Change");
-    const float nw = L.caption->CalcTextSizeA(16 * L.k, FLT_MAX, 0, note).x / L.k;
-    text(L, L.caption, 16, kPanelW - 24 - nw, cy - 8 - 1, nw + 1, kDim, note);
+    key("A", "Change"); key("B", "Close"); key("L1 R1", "Page"); key("D-pad", "Select");
+    const float sy = ky + 28 + 6;  // the save line: 17 px in a 23.8 px line
+    const float vw = L.caption->CalcTextSizeA(15 * L.k, FLT_MAX, 0, version).x / L.k;
+    text(L, L.caption, 17, 30, sy + 3.4f, kPanelW - 60 - vw - 12, look::kDim, "Touch works too. Changes apply and save immediately.");
+    text(L, L.caption, 15, kPanelW - 30 - vw - 1, sy + 3.4f + 1.6f, vw + 1, look::kDim, version);
+    text(L, L.caption, 15, 30, sy + 23.8f + 8 + 3.75f, kPanelW - 60, look::kDim, "Uses AMD FSR and Intel XeSS. FSR is a trademark of AMD, XeSS of Intel.");
 }
 
 }  // namespace deck

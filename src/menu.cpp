@@ -92,9 +92,12 @@ pad::PadView g_padView;
 bool g_padUsed, g_padOpened, g_padBusy, g_padRelease;
 bool g_typing;  // last frame a setting's box was being typed in: Esc then leaves the box, not the menu
 // The Steam Deck layout (menu_deck.h): g_isDeck, a Steam Deck was detected; g_layout, [overlay] layout (0 Automatic,
-// 1 Steam Deck, 2 Desktop); g_deckOpen, this opening of the menu uses the Deck layout. Its fonts are built at
-// g_deckFontK times their design size, on every machine, so a PC can switch to the Deck layout without a restart.
-bool g_isDeck, g_deckOpen;
+// 1 Steam Deck, 2 Desktop); g_deckOpen, the menu shows the Deck layout (picked when it opens, changed by the Portable
+// mode switch through g_swap, applied in compose). Its fonts are built at g_deckFontK times their design size, on every
+// machine, so a PC can switch to the Deck layout without a restart. g_focusPortable: the desktop menu has just taken
+// over from the Deck layout and focuses its Portable mode switch.
+bool g_isDeck, g_deckOpen, g_focusPortable;
+deck::Swap g_swap;
 int g_layout;
 float g_deckFontK = 1;
 ImFont *g_deck26, *g_deck24, *g_deck19;
@@ -790,6 +793,7 @@ void drawMenu() {
     ImGui::SetNextWindowPos({ vp->Size.x * 0.5f, vp->Size.y * 0.5f }, ImGuiCond_Appearing, { 0.5f, 0.5f });
     const float s = g_scale;
     look::ctx().s = s; look::ctx().fontSmall = g_small;
+    look::ctx().bob = look::bobX(ImGui::GetTime());  // the glove's sway, once a frame
     ImGui::SetNextWindowSize({ 600 * s, 0 }, ImGuiCond_Always);
     DesktopLook styled;  // popped after End
     ImGui::Begin("Lumenveil", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoCollapse |
@@ -803,7 +807,7 @@ void drawMenu() {
     if (g_padOpened) { pad::focusFirst(); g_padOpened = false; }
     ImGui::PushTextWrapPos(0.0f);  // notes wrap at the window edge instead of being clipped
     const float labelW = 30 * s + 212 * s;  // the widgets' column, from the window's edge
-    // a setting's row: the selected row's look, the name indented past the cursor diamond, the widget to the right edge
+    // a setting's row: the selected row's look, the name indented past the glove, the widget to the right edge
     auto label = [&](const char* t) {
         look::row();
         ImGui::AlignTextToFramePadding();
@@ -1120,11 +1124,13 @@ void drawMenu() {
     static const char* corners[] = { "Top left", "Top right", "Bottom left", "Bottom right" };
     label("Position");
     if (look::option("##corner", &g_corner, corners, 4)) iniSet(L"overlay", L"corner", g_corner);
-    {  // every machine: a handheld the mod does not recognise picks the Steam Deck layout here
-        static const char* layouts[] = { "Automatic", "Steam Deck", "Desktop" };
-        label("Layout");
-        if (look::option("##layout", &g_layout, layouts, 3)) iniSet(L"overlay", L"layout", g_layout);
+    {  // every machine: a handheld the mod does not recognise turns Portable mode on here; the layout changes at once
+        label("Portable mode");
+        bool on = g_swap.shown(g_deckOpen);
+        if (look::portable("##portable", on, g_deck26 != nullptr)) { g_layout = on ? 1 : 2; iniSet(L"overlay", L"layout", g_layout); g_swap.flip(on, ImGui::GetTime(), g_deckOpen); }
+        look::takeFocus(g_focusPortable, g_padUsed);
     }
+    note(look::kDim, "Bigger text, pages and touch controls for handhelds. Switches now.");
 
     // the footer: a faint line, the key hints, then the save line and the trademarks
     ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 8 * s);
@@ -1176,6 +1182,7 @@ void drawDeckMenu() {
     deck::Nav& nav = g_deckNav;
     deck::Typing& typing = g_deckTyping;
     g_padOpened = false;  // the focus is the layout's own
+    look::ctx().bob = look::bobX(ImGui::GetTime());  // the glove's sway, once a frame
     // the controller: up / down move the focus, left / right change the value (repeating only on a slider), A, L1 / R1
     // change page; B leaves a number box being typed in (pollToggle closes the menu on B otherwise)
     const uint16_t edges = g_padView.edges;
@@ -1199,7 +1206,6 @@ void drawDeckMenu() {
         return r;
     };
     auto took = [&](const deck::RowOut& o) { if (o.press) nav.focus[nav.page] = row; ++row; return o.step; };
-    auto accent = [&](Vendor v) { L.acc = kAccents[v].base; L.accHi = kAccents[v].hi; };
     char line[192];
 
     // what both pages show, worked out as drawMenu does
@@ -1207,7 +1213,6 @@ void drawDeckMenu() {
     const bool activeKnown = di.active >= 0 && di.active < kUpscalerCount;
     const int autoUp = nvidiaGpu ? 0 : intelGpu && !missing(kUpscalers[2].file) ? 2 : 1;  // what Auto picks on this GPU
     const int want = di.upscaler >= 0 && di.upscaler < kUpscalerCount ? di.upscaler : activeKnown ? di.active : autoUp;
-    const Vendor upVendor = kUpscalers[activeKnown ? di.active : want].vendor;
     const FgStatus st = fgStatus();
     FgSettings fs = fgSettings();
     FgPick& fp = fgPick();
@@ -1223,13 +1228,11 @@ void drawDeckMenu() {
     deck::begin(L);
     if (g_logo || g_logo11)
         deck::logo(L, g_native ? (ImTextureID)(uintptr_t)g_logo11 : (ImTextureID)gpuAt(g_srvHeap, 2).ptr, g_logoW / g_logoH);
-    accent(nav.page == 0 ? upVendor : nav.page == 1 ? kBackends[picked].vendor : kNeutral);
     const int to = deck::tabs(L, nav.page, nullptr);
     if (to != nav.page) { deck::leaveTyping(typing); nav.page = to; }
 
     if (nav.page == 0) {
         deck::section(L, "Upscaling");
-        accent(upVendor);
         static const int upscalers[] = { -1, 1, 2 };  // Auto, AMD FSR, Intel XeSS
         char autoName[64];
         snprintf(autoName, sizeof autoName, "Auto  (%s on this %s)", kUpscalers[autoUp].shortName, here);
@@ -1250,7 +1253,6 @@ void drawDeckMenu() {
         }
         if (took(deck::toggle(L, "##upscale", "Enabled", dlssEnabled(), in(false)))) dlssToggle();
 
-        accent(kNeutral);
         ScaleState& ss = scaleState();
         const int upPct = ultraPerformancePct(want == 2);  // 0 with XeSS: Ultra Performance left out (xess_rules.h)
         const int pcts[] = { 100, 67, 58, 50, upPct ? upPct : 33 };
@@ -1276,7 +1278,6 @@ void drawDeckMenu() {
             deck::status(L, line, deck::kDim);
         } else deck::status(L, "Changes apply the next time the game starts.", deck::kDim);
 
-        accent(upVendor);
         int sharp = di.sharpness;
         deck::RowOut o;
         if (deck::slider(L, "##sharp", "Sharpening", sharp, 0, 100, 5, "%", in(false, true), typing, &o)) {
@@ -1286,11 +1287,11 @@ void drawDeckMenu() {
         took(o);
     } else if (nav.page == 1) {
         deck::section(L, "Frame generation");
-        accent(kBackends[picked].vendor);
         static const int backends[] = { 1, 2 };  // AMD FSR, Intel XeSS
         char autoName[64];
         snprintf(autoName, sizeof autoName, "Auto  (%s on this %s)", kUpscalers[resolve(-1)].shortName, here);
-        const char* bName = fp.backend >= 1 && fp.backend <= kBackendCount ? kBackends[fp.backend - 1].name : autoName;
+        // the short names (AMD FSR, Intel XeSS): the upscalers' table is by the same id
+        const char* bName = fp.backend >= 1 && fp.backend <= kBackendCount ? kUpscalers[fp.backend - 1].name : autoName;
         if (const int s = took(deck::cycler(L, "##fgbackend", "Backend", bName, in(false)))) {
             fp.backend = deck::listStep(backends, 2, fp.backend - 1, s) + 1;
             iniSet(L"fg", L"backend", fp.backend - 1);
@@ -1327,7 +1328,7 @@ void drawDeckMenu() {
             deck::status(L, line, deck::kGreen);
         } else deck::status(L, !fs.enable ? "Frame generation is off." : st.available ? "Idle: turns on in gameplay, where the upscaler runs." : "", deck::kDim);
 
-        accent(kNeutral);  // the mod's own frame cap, usable as in drawMenu
+        // the mod's own frame cap, usable as in drawMenu
         const bool capDim = !st.available && st.backend < 0 && di.active != 1 && di.active != 2 && !st.vsyncPaced;
         char autoCap[32];
         snprintf(autoCap, sizeof autoCap, "Auto (%s)", syncName());
@@ -1351,7 +1352,6 @@ void drawDeckMenu() {
         }
     } else {
         deck::section(L, "Overlay");
-        accent(kNeutral);
         if (took(deck::toggle(L, "##counter", "FPS counter", g_counter, in(false)))) { g_counter = !g_counter; iniSet(L"overlay", L"enable", g_counter); }
         static const char* const corners[] = { "Top left", "Top right", "Bottom left", "Bottom right" };
         if (const int s = took(deck::cycler(L, "##corner", "Position", corners[g_corner], in(!g_counter)))) {
@@ -1359,17 +1359,14 @@ void drawDeckMenu() {
             iniSet(L"overlay", L"corner", g_corner);
         }
         deck::section(L, "Layout");
-        static const char* const layouts[] = { "Automatic", "Steam Deck", "Desktop" };
-        char autoLayout[48];
-        snprintf(autoLayout, sizeof autoLayout, "Automatic  (%s)", g_isDeck ? "Steam Deck found" : "no Steam Deck");
-        if (const int s = took(deck::cycler(L, "##layout", "Layout", g_layout ? layouts[g_layout] : autoLayout, in(false)))) {
-            g_layout = deck::wrapStep(g_layout, 3, s);
-            iniSet(L"overlay", L"layout", g_layout);
+        bool on = g_swap.shown(g_deckOpen);
+        if (took(deck::portableRow(L, "##portable", "Portable mode", on, in(!g_deck26)))) {
+            on = !on;
+            g_layout = on ? 1 : 2; iniSet(L"overlay", L"layout", g_layout); g_swap.flip(on, ImGui::GetTime(), g_deckOpen);
         }
-        deck::status(L, g_layout == 2 ? "Desktop layout from the next time the menu opens."
-                                      : "Automatic picks this layout on a Steam Deck. Desktop suits a docked Deck on a TV.", deck::kDim);
+        deck::status(L, "Bigger text, pages and touch controls for handhelds. Switches now.", deck::kDim);
     }
-    deck::footer(L, "Saves at once");
+    deck::footer(L, "Lumenveil " LUMENVEIL_VERSION);
     deck::end(L);
     g_padBusy = g_typing = typing.id != 0;  // B and Esc leave the number box before they close the menu
 }
@@ -1491,6 +1488,7 @@ void pollToggle() {
             g_open = true;
             g_deckOpen = g_deck26 && deck::deckLayoutOn(g_layout, g_isDeck);
             g_deckTyping = {};
+            g_swap = {}; g_focusPortable = false;  // a change still pending when the menu closed is dropped
             g_mouse = { g_w * 0.5f, g_h * 0.5f };
             if (stickCombo) g_padUsed = g_padOpened = true;
         }
@@ -1680,6 +1678,15 @@ bool compose(IDXGISwapChain3* sc, UINT index, bool layer) {
     const bool front = g_open && GetForegroundWindow() == g_wnd;
     keys.feed(io, [front](int vk) { return front && (GetAsyncKeyState(vk) & 0x8000) != 0; });
     if (g_open) {
+        // a Portable mode flip lands here, before the controller is fed and the navigation flags are set, so the new
+        // layout has its own navigation from its first frame: the Deck layout on its Overlay page with Portable mode
+        // focused, the desktop menu with its switch focused
+        if (g_swap.due(ImGui::GetTime())) {
+            g_deckOpen = g_deck26 && g_swap.want == 1;
+            g_swap = {}; g_deckTyping = {};
+            g_padBusy = g_typing = false;
+            deck::landFocus(g_deckOpen, g_deckNav, g_focusPortable);
+        }
         if (g_padView.connected) io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
         else io.BackendFlags &= ~ImGuiBackendFlags_HasGamepad;
         pad::feedPad(io, g_padView, g_padBusy);
