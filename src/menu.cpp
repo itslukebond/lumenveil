@@ -8,6 +8,7 @@
 #include "fg_select.h"
 #include "menu_buttons.h"
 #include "menu_pad.h"
+#include "menu_deck.h"
 #include "game_config.h"
 #include "xess_rules.h"
 #include "antilag_rules.h"
@@ -85,9 +86,19 @@ pad::EmptySlots g_emptySlots;  // empty controller slots answered from the cache
 pad::PadView g_padView;
 bool g_padUsed, g_padOpened, g_padBusy, g_padRelease;
 bool g_typing;  // last frame a setting's box was being typed in: Esc then leaves the box, not the menu
+// The Steam Deck layout (menu_deck.h): g_isDeck, a Steam Deck was detected; g_layout, [overlay] layout (0 Automatic,
+// 1 Steam Deck, 2 Desktop); g_deckOpen, this opening of the menu uses the Deck layout. Its fonts are built at
+// g_deckFontK times their design size, and only on a Deck or with Layout not Automatic (else null).
+bool g_isDeck, g_deckOpen;
+int g_layout;
+float g_deckFontK = 1;
+ImFont *g_deck26, *g_deck24, *g_deck19;
+deck::Nav g_deckNav;
+deck::Typing g_deckTyping;
 static_assert(pad::kUp == XINPUT_GAMEPAD_DPAD_UP && pad::kDown == XINPUT_GAMEPAD_DPAD_DOWN && pad::kLeft == XINPUT_GAMEPAD_DPAD_LEFT &&
               pad::kRight == XINPUT_GAMEPAD_DPAD_RIGHT && pad::kL3 == XINPUT_GAMEPAD_LEFT_THUMB && pad::kR3 == XINPUT_GAMEPAD_RIGHT_THUMB &&
-              pad::kA == XINPUT_GAMEPAD_A && pad::kB == XINPUT_GAMEPAD_B && pad::kStickDeadzone == XINPUT_GAMEPAD_LEFT_THUMB_DEADZONE,
+              pad::kA == XINPUT_GAMEPAD_A && pad::kB == XINPUT_GAMEPAD_B && pad::kStickDeadzone == XINPUT_GAMEPAD_LEFT_THUMB_DEADZONE &&
+              pad::kL1 == XINPUT_GAMEPAD_LEFT_SHOULDER && pad::kR1 == XINPUT_GAMEPAD_RIGHT_SHOULDER,
               "menu_pad.h's button bits match XInput's");
 LARGE_INTEGER g_freq, g_last;
 
@@ -487,6 +498,16 @@ void loadFonts() {
     if (!(g_bigThin = load(mod + L"texgyreadventor-regular.otf", std::round(38 * g_scale)))) g_bigThin = load(sys + L"segoeui.ttf", std::round(40 * g_scale));
     if (!g_big) g_big = g_font;
     if (!g_bigThin) g_bigThin = g_big;
+    if (g_isDeck || g_layout != 0) {  // the Steam Deck layout's 26, 24 and 19 px, after the desktop's fonts, which stay as they were
+        cfg.OversampleH = cfg.OversampleV = 1;  // large sizes need none; keeps the atlas small
+        ImFont** deckFonts[3] = { &g_deck26, &g_deck24, &g_deck19 };
+        const float px[3] = { 26, 24, 19 };
+        for (int i = 0; i < 3; ++i)
+            if (!(*deckFonts[i] = load(mod + L"texgyreadventor-regular.otf", std::round(px[i] * g_deckFontK))))
+                *deckFonts[i] = load(sys + L"segoeui.ttf", std::round(px[i] * g_deckFontK));
+        if (!g_deck24) g_deck24 = g_deck26;
+        if (!g_deck19) g_deck19 = g_deck26;
+    }
 }
 
 void applyStyle() {
@@ -621,6 +642,30 @@ void drawCounter() {
     ImGui::PopStyleVar(2);
 }
 
+// Settings both layouts change, so a change in one shows in the other: the game's scaling mode (GraphicsConfig.ini, read
+// once, on the first menu frame) and the frame generation backend (the setting at launch, whether frame generation was
+// on at launch, and the menu's choice: 0 Auto, else the backend's id + 1).
+struct ScaleState { std::wstring cfg; int ratio; };
+ScaleState& scaleState() {
+    static ScaleState s = [] {
+        ScaleState r{ gameConfig(), 0 };
+        r.ratio = r.cfg.empty() ? 0 : GetPrivateProfileIntW(L"BasicSettings", L"RenderingResolutionRatio", 100, r.cfg.c_str());
+        return r;
+    }();
+    return s;
+}
+struct FgPick { int launchBackend; bool launchEnable; int backend; };
+FgPick& fgPick() {
+    static FgPick p = [] {
+        FgPick r;
+        r.launchBackend = iniGet(L"fg", L"backend", -1);
+        r.launchEnable = fgSettings().enable != 0;  // FSR's swapchain is only created when FG is on at launch
+        r.backend = r.launchBackend >= -1 && r.launchBackend < kBackendCount ? r.launchBackend + 1 : 0;
+        return r;
+    }();
+    return p;
+}
+
 void drawMenu() {
     const ImGuiViewport* vp = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos({ vp->Size.x * 0.5f, vp->Size.y * 0.5f }, ImGuiCond_Appearing, { 0.5f, 0.5f });
@@ -672,8 +717,9 @@ void drawMenu() {
     const int upPct = ultraPerformancePct(want == 2);  // 0 with XeSS: no game scale value fits it below 50% (xess_rules.h)
     const Mode scaleModes[] = { { "DLAA", 100 }, { "Quality", 67 }, { "Balanced", 58 }, { "Performance", 50 }, { "Ultra Performance", upPct ? upPct : 33 } };
     const int modeCount = upPct ? 5 : 4;  // Ultra Performance last, left out when not offered
-    static const std::wstring cfg = gameConfig();
-    static int ratio = cfg.empty() ? 0 : GetPrivateProfileIntW(L"BasicSettings", L"RenderingResolutionRatio", 100, cfg.c_str());
+    ScaleState& ss = scaleState();
+    const std::wstring& cfg = ss.cfg;
+    int& ratio = ss.ratio;
     auto modeText = [&](char* buf, size_t n, const char* name, int pct) {
         if (di.dispW) snprintf(buf, n, "%s  \xC2\xB7  %d%%  \xC2\xB7  %u\xC3\x97%u \xE2\x86\x92 %u\xC3\x97%u", name, pct,
                                di.dispW * pct / 100, di.dispH * pct / 100, di.dispW, di.dispH);
@@ -753,9 +799,10 @@ void drawMenu() {
     // The backend decides which swapchain the presenter creates at launch, so a change applies at the next launch.
     // Auto resolves as the presenter does (fgPickBackend): DLSS-G on an NVIDIA GPU with nvngx_dlssg.dll in place, XeSS-FG
     // on an Intel GPU with Intel's three XeSS files, else FSR.
-    static const int launchBackend = iniGet(L"fg", L"backend", -1);
-    static const bool launchEnable = fs.enable != 0;  // FSR's swapchain is only created when FG is on at launch
-    static int backend = launchBackend >= -1 && launchBackend < kBackendCount ? launchBackend + 1 : 0;
+    FgPick& fp = fgPick();
+    const int launchBackend = fp.launchBackend;
+    const bool launchEnable = fp.launchEnable;
+    int& backend = fp.backend;
     const bool dlssg = !missing(L"ffxv_dlss\\streamline\\nvngx_dlssg.dll");
     const bool fsrFiles = !missing(kUpscalers[1].file), fsrFgDll = !missing(L"ffxv_dlss\\fidelityfx\\amd_fidelityfx_framegeneration_dx12.dll");
     const bool xessFgFiles = xessFgPresent();
@@ -915,6 +962,11 @@ void drawMenu() {
     static const char* corners[] = { "Top left", "Top right", "Bottom left", "Bottom right" };
     label("Position");
     if (ImGui::Combo("##corner", &g_corner, corners, 4)) iniSet(L"overlay", L"corner", g_corner);
+    if (g_isDeck || g_layout != 0) {  // the way back to the Steam Deck layout; a PC on Automatic never shows it
+        static const char* layouts[] = { "Automatic", "Steam Deck", "Desktop" };
+        label("Layout");
+        if (ImGui::Combo("##layout", &g_layout, layouts, 3)) iniSet(L"overlay", L"layout", g_layout);
+    }
 
     ImGui::Spacing();
     const bool popup = ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup);
@@ -926,6 +978,214 @@ void drawMenu() {
                         "Reflex are trademarks of NVIDIA Corporation, FSR of AMD and XeSS of Intel.");
     ImGui::PopTextWrapPos();
     ImGui::End();
+}
+
+// The Steam Deck layout (menu_deck.h): three pages switched with L1 / R1 or the tabs, one setting per row, saved through
+// the same setters and keys as drawMenu. What the Deck's AMD graphics cannot run is left out: DLSS and its model, DLSS
+// Frame Generation, Reflex, and Anti-Lag 2 (AMD's Windows driver only).
+void drawDeckMenu() {
+    auto missing = [](const wchar_t* f) { return GetFileAttributesW(path(f).c_str()) == INVALID_FILE_ATTRIBUTES; };
+    const bool nvidiaGpu = g_vendorId == 0x10DE, intelGpu = g_vendorId == 0x8086;
+    deck::Look L = deck::Look::at(float(g_w), float(g_h), g_deck26, g_deck24, g_deck19);
+    deck::Nav& nav = g_deckNav;
+    deck::Typing& typing = g_deckTyping;
+    g_padOpened = false;  // the focus is the layout's own
+    // the controller: up / down move the focus, left / right change the value (repeating only on a slider), A, L1 / R1
+    // change page; B leaves a number box being typed in (pollToggle closes the menu on B otherwise)
+    const uint16_t edges = g_padView.edges;
+    if (typing.id && (edges & pad::kB)) deck::leaveTyping(typing);
+    if (!typing.id) {
+        if (edges & pad::kL1) nav.turn(-1);
+        if (edges & pad::kR1) nav.turn(1);
+        if (ImGui::IsKeyPressed(ImGuiKey_GamepadDpadUp)) nav.move(deck::kRows[nav.page], -1);
+        if (ImGui::IsKeyPressed(ImGuiKey_GamepadDpadDown)) nav.move(deck::kRows[nav.page], 1);
+    }
+    const int lrOnce = typing.id ? 0 : ImGui::IsKeyPressed(ImGuiKey_GamepadDpadLeft, false) ? -1
+                     : ImGui::IsKeyPressed(ImGuiKey_GamepadDpadRight, false) ? 1 : 0;
+    const int lrRepeat = typing.id ? 0 : pad::padLeftRight();
+    const bool a = !typing.id && (edges & pad::kA);
+    int row = 0;
+    auto in = [&](bool dim, bool slider = false) {
+        deck::RowIn r;
+        r.focused = row == nav.focus[nav.page];
+        r.dim = dim;
+        if (r.focused && !dim) { r.lr = slider ? lrRepeat : lrOnce; r.a = a; }
+        return r;
+    };
+    auto took = [&](const deck::RowOut& o) { if (o.press) nav.focus[nav.page] = row; ++row; return o.step; };
+    auto accent = [&](Vendor v) { L.acc = kAccents[v].base; L.accHi = kAccents[v].hi; };
+    char line[192];
+
+    // what both pages show, worked out as drawMenu does
+    const DlssInfo di = dlssInfo();
+    const bool activeKnown = di.active >= 0 && di.active < kUpscalerCount;
+    const int autoUp = nvidiaGpu ? 0 : intelGpu && !missing(kUpscalers[2].file) ? 2 : 1;  // what Auto picks on this GPU
+    const int want = di.upscaler >= 0 && di.upscaler < kUpscalerCount ? di.upscaler : activeKnown ? di.active : autoUp;
+    const Vendor upVendor = kUpscalers[activeKnown ? di.active : want].vendor;
+    const FgStatus st = fgStatus();
+    FgSettings fs = fgSettings();
+    FgPick& fp = fgPick();
+    const bool dlssg = !missing(L"ffxv_dlss\\streamline\\nvngx_dlssg.dll");
+    const bool fsrFiles = !missing(kUpscalers[1].file), fsrFgDll = !missing(L"ffxv_dlss\\fidelityfx\\amd_fidelityfx_framegeneration_dx12.dll");
+    const bool xessFgFiles = xessFgPresent();
+    auto resolve = [&](int b) { return fgPickBackend(b, g_vendorId, dlssg, xessFgFiles); };
+    const int running = st.backend >= 0 ? st.backend : resolve(fp.launchBackend), picked = resolve(fp.backend - 1);
+    const bool fsrOffAtLaunch = !st.available && !fp.launchEnable && !st.formatRefused
+                                && ((running == 1 && fsrFiles && fsrFgDll) || (running == 2 && xessFgFiles));
+    const char* here = g_isDeck ? "Deck" : "PC";
+
+    deck::begin(L);
+    if (g_logo || g_logo11)
+        deck::logo(L, g_native ? (ImTextureID)(uintptr_t)g_logo11 : (ImTextureID)gpuAt(g_srvHeap, 2).ptr, g_logoW / g_logoH);
+    accent(nav.page == 0 ? upVendor : nav.page == 1 ? kBackends[picked].vendor : kNeutral);
+    const int to = deck::tabs(L, nav.page, nullptr);
+    if (to != nav.page) { deck::leaveTyping(typing); nav.page = to; }
+
+    if (nav.page == 0) {
+        deck::section(L, "Upscaling");
+        accent(upVendor);
+        static const int upscalers[] = { -1, 1, 2 };  // Auto, AMD FSR, Intel XeSS
+        char autoName[64];
+        snprintf(autoName, sizeof autoName, "Auto  (%s on this %s)", kUpscalers[autoUp].shortName, here);
+        const char* upName = di.upscaler >= 0 && di.upscaler < kUpscalerCount ? kUpscalers[di.upscaler].name : autoName;
+        if (const int s = took(deck::cycler(L, "##upscaler", "Upscaler", upName, in(false)))) {
+            const int u = deck::listStep(upscalers, 3, di.upscaler >= -1 && di.upscaler < kUpscalerCount ? di.upscaler : -1, s);
+            dlssSetUpscaler(u);
+            iniSet(L"dlss", L"upscaler", u);
+        }
+        if (want == 0 && !nvidiaGpu) deck::status(L, "DLSS needs an NVIDIA GeForce RTX card. The game uses its own anti-aliasing.", deck::kAmber);
+        else if (missing(kUpscalers[want].file)) deck::status(L, kUpscalers[want].missing, deck::kAmber);
+        else {
+            if (di.active == 1 && *di.fsrVersion) snprintf(line, sizeof line, "AMD FSR %s upscaling.", di.fsrVersion);
+            else if (di.active == 2 && *di.xessVersion)
+                snprintf(line, sizeof line, g_isDeck ? "Intel XeSS %s, running on the Deck's AMD graphics." : "Intel XeSS %s upscaling.", di.xessVersion);
+            else snprintf(line, sizeof line, "%s upscaling.", kUpscalers[want].name);
+            deck::status(L, line, deck::kDim);
+        }
+        if (took(deck::toggle(L, "##upscale", "Enabled", dlssEnabled(), in(false)))) dlssToggle();
+
+        accent(kNeutral);
+        ScaleState& ss = scaleState();
+        const int upPct = ultraPerformancePct(want == 2);  // 0 with XeSS: Ultra Performance left out (xess_rules.h)
+        const int pcts[] = { 100, 67, 58, 50, upPct ? upPct : 33 };
+        static const char* const modeNames[] = { "Native AA", "Quality", "Balanced", "Performance", "Ultra Performance" };
+        const char* mode = ss.ratio == 33 || ss.ratio == 34 ? modeNames[4] : "Custom";
+        for (int i = 0; i < 5; ++i) if (pcts[i] == ss.ratio) mode = modeNames[i];
+        char modeText[64] = "GraphicsConfig.ini not found";
+        if (ss.ratio) snprintf(modeText, sizeof modeText, "%s  \xC2\xB7  %d%%", mode, ss.ratio);
+        if (const int s = took(deck::cycler(L, "##scale", "Scaling mode", modeText, in(!ss.ratio)))) {
+            const int n = deck::listStep(pcts, upPct ? 5 : 4, ss.ratio, s);
+            if (n != ss.ratio) {
+                ss.ratio = n;
+                WritePrivateProfileStringW(L"BasicSettings", L"RenderingResolutionRatio", std::to_wstring(n).c_str(), ss.cfg.c_str());
+            }
+        }
+        const int live = di.outW ? int(std::lround(100.0 * di.inH / di.outH)) : 0;
+        if (want == 2 && ((ss.ratio && ss.ratio < xessLowestPct()) || xessInputBelowRange())) {
+            snprintf(line, sizeof line, "Intel XeSS needs a scaling mode of %d%% or more, then a restart.", xessLowestPct());
+            deck::status(L, line, deck::kAmber);
+        } else if (ss.ratio && live && std::abs(live - ss.ratio) > 1) deck::status(L, "Restart the game to apply the new scaling mode.", deck::kGreen);
+        else if (live) {
+            snprintf(line, sizeof line, "Now rendering %u\xC3\x97%u \xE2\x86\x92 %u\xC3\x97%u (%d%%).", di.inW, di.inH, di.outW, di.outH, live);
+            deck::status(L, line, deck::kDim);
+        } else deck::status(L, "Changes apply the next time the game starts.", deck::kDim);
+
+        accent(upVendor);
+        int sharp = di.sharpness;
+        deck::RowOut o;
+        if (deck::slider(L, "##sharp", "Sharpening", sharp, 0, 100, 5, "%", in(false, true), typing, &o)) {
+            dlssSetSharpness(sharp);
+            iniSet(L"dlss", L"sharpness", sharp);
+        }
+        took(o);
+    } else if (nav.page == 1) {
+        deck::section(L, "Frame generation");
+        accent(kBackends[picked].vendor);
+        static const int backends[] = { 1, 2 };  // AMD FSR, Intel XeSS
+        char autoName[64];
+        snprintf(autoName, sizeof autoName, "Auto  (%s on this %s)", kUpscalers[resolve(-1)].shortName, here);
+        const char* bName = fp.backend >= 1 && fp.backend <= kBackendCount ? kBackends[fp.backend - 1].name : autoName;
+        if (const int s = took(deck::cycler(L, "##fgbackend", "Backend", bName, in(false)))) {
+            fp.backend = deck::listStep(backends, 2, fp.backend - 1, s) + 1;
+            iniSet(L"fg", L"backend", fp.backend - 1);
+        }
+        const char* note = nullptr;
+        ImVec4 noteCol = deck::kDim;
+        if ((fp.backend - 1 != fp.launchBackend && picked != running) || (fsrOffAtLaunch && fs.enable)) {
+            note = "Restart the game to switch frame generation."; noteCol = deck::kGreen;
+        } else if (!st.available) {
+            if (running == 0) { note = dlssg ? "Not available: DLSS Frame Generation needs an RTX 40 or 50 series card." : "nvngx_dlssg.dll not found."; noteCol = dlssg ? deck::kDim : deck::kAmber; }
+            else if (running == 2) {
+                if (!xessFgFiles) { note = "Intel's XeSS frame generation needs libxess.dll, libxess_fg.dll and libxell.dll in ffxv_dlss\\xess."; noteCol = deck::kAmber; }
+                else if (st.formatRefused) note = "Not available: Intel XeSS frame generation does not take the game's HDR output format.";
+                else if (fp.launchEnable) note = "Not available: Intel XeSS frame generation did not start. ffxv_dlss.log has the reason.";
+            } else if (!fsrFiles) { note = "AMD's FSR files not found (see the Upscaling page)."; noteCol = deck::kAmber; }
+            else if (!fsrFgDll) { note = "amd_fidelityfx_framegeneration_dx12.dll not found in ffxv_dlss\\fidelityfx."; noteCol = deck::kAmber; }
+            else if (fp.launchEnable) note = "Not available: AMD FSR frame generation did not start. ffxv_dlss.log has the reason.";
+        }
+        if (!note) {
+            if (st.available && st.backend == 1 && *fsrFgVersion()) snprintf(line, sizeof line, "AMD FSR frame generation %s.", fsrFgVersion());
+            else if (st.available && st.backend == 2 && *xessFgVersion())
+                snprintf(line, sizeof line, "Intel XeSS frame generation %s, with Xe Low Latency.", xessFgVersion());
+            else snprintf(line, sizeof line, "%s", picked == 2 ? "Intel XeSS frame generation, with Xe Low Latency."
+                                                               : "AMD FSR frame generation. The game waits for the GPU each frame.");
+            note = line;
+        }
+        deck::status(L, note, noteCol);
+        const bool fgDim = !st.available && !fsrOffAtLaunch;
+        bool changed = false;
+        if (took(deck::toggle(L, "##fg", "Enabled", fs.enable != 0, in(fgDim)))) { fs.enable = fs.enable ? 0 : 1; changed = true; }
+        took(deck::cycler(L, "##mode", "Mode", "2\xC3\x97", in(fgDim)));  // FSR and XeSS generate 2x: nothing to change
+        if (st.generating && g_fpsRendered > 0) {
+            snprintf(line, sizeof line, "Generating %.1f\xC3\x97 \xC2\xB7 %.0f shown from %.0f rendered", g_fpsShown / g_fpsRendered, g_fpsShown, g_fpsRendered);
+            deck::status(L, line, deck::kGreen);
+        } else deck::status(L, !fs.enable ? "Frame generation is off." : st.available ? "Idle: turns on in gameplay, where the upscaler runs." : "", deck::kDim);
+
+        accent(kNeutral);  // the mod's own frame cap, usable as in drawMenu
+        const bool capDim = !st.available && st.backend < 0 && di.active != 1 && di.active != 2 && !st.vsyncPaced;
+        char autoCap[32];
+        snprintf(autoCap, sizeof autoCap, "Auto (%s)", syncName());
+        const char* capModes[] = { "Off", autoCap, "Custom" };
+        int capMode = fs.limit < 0 ? 1 : fs.limit == 0 ? 0 : 2;
+        if (const int s = took(deck::cycler(L, "##capmode", "Frame cap", capModes[capMode], in(capDim)))) {
+            capMode = deck::wrapStep(capMode, 3, s);
+            fs.limit = capMode == 0 ? 0 : capMode == 1 ? -1 : std::max(st.autoCap, 60);
+            changed = true;
+        }
+        int cap = capMode == 2 ? fs.limit : std::max(st.autoCap, 60);
+        deck::RowOut o;
+        if (deck::slider(L, "##limit", "Cap", cap, 30, 480, 5, " fps", in(capDim || capMode != 2, true), typing, &o) && capMode == 2) {
+            fs.limit = cap;
+            changed = true;
+        }
+        took(o);
+        if (changed) {  // as drawMenu saves them; this page changes only these two
+            fgApply(fs);
+            iniSet(L"fg", L"enable", fs.enable); iniSet(L"fg", L"limit", fs.limit);
+        }
+    } else {
+        deck::section(L, "Overlay");
+        accent(kNeutral);
+        if (took(deck::toggle(L, "##counter", "FPS counter", g_counter, in(false)))) { g_counter = !g_counter; iniSet(L"overlay", L"enable", g_counter); }
+        static const char* const corners[] = { "Top left", "Top right", "Bottom left", "Bottom right" };
+        if (const int s = took(deck::cycler(L, "##corner", "Position", corners[g_corner], in(!g_counter)))) {
+            g_corner = deck::wrapStep(g_corner, 4, s);
+            iniSet(L"overlay", L"corner", g_corner);
+        }
+        deck::section(L, "Layout");
+        static const char* const layouts[] = { "Automatic", "Steam Deck", "Desktop" };
+        char autoLayout[48];
+        snprintf(autoLayout, sizeof autoLayout, "Automatic  (%s)", g_isDeck ? "Steam Deck found" : "no Steam Deck");
+        if (const int s = took(deck::cycler(L, "##layout", "Layout", g_layout ? layouts[g_layout] : autoLayout, in(false)))) {
+            g_layout = deck::wrapStep(g_layout, 3, s);
+            iniSet(L"overlay", L"layout", g_layout);
+        }
+        deck::status(L, g_layout == 2 ? "Desktop layout from the next time the menu opens."
+                                      : "Automatic picks this layout on a Steam Deck. Desktop suits a docked Deck on a TV.", deck::kDim);
+    }
+    deck::footer(L, "Saves at once");
+    deck::end(L);
+    g_padBusy = g_typing = typing.id != 0;  // B and Esc leave the number box before they close the menu
 }
 
 // The menu logo: resource 101 of this DLL (a PNG, src/res/logo.png), decoded with WIC and uploaded once into SRV slot 2
@@ -1043,6 +1303,8 @@ void pollToggle() {
         if (g_open) closeMenu();
         else {
             g_open = true;
+            g_deckOpen = g_deck26 && deck::deckLayoutOn(g_layout, g_isDeck);
+            g_deckTyping = {};
             g_mouse = { g_w * 0.5f, g_h * 0.5f };
             if (stickCombo) g_padUsed = g_padOpened = true;
         }
@@ -1078,16 +1340,24 @@ void feedMouse(ImGuiIO& io) {
     }
     const bool os[3] = { (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0, (GetAsyncKeyState(VK_RBUTTON) & 0x8000) != 0, false };
     io.AddMousePosEvent(g_mouse.x, g_mouse.y);
+    bool leftPress = false;
     for (int i = 0; i < 3; ++i) {
         osDownFrames += os[i];
         const ButtonStates s = buttonEvents(di, b.down[i], b.hit[i], os[i]);
         for (int k = 0; k < s.n; ++k) {
             if (s.state[k] && !sent[i]) ++pressesSent;
+            if (s.state[k] && !sent[i] && i == 0) leftPress = true;
             sent[i] = s.state[k];
             io.AddMouseButtonEvent(i, s.state[k]);
         }
     }
     if (wheel) io.AddMouseWheelEvent(0, wheel / 120.f);
+    if (leftPress && g_deckOpen) {  // where a press lands in the Steam Deck layout: a touchscreen tap arrives as a left click
+        POINT c = {}; RECT r = {};
+        const bool read = GetCursorPos(&c) && ScreenToClient(g_wnd, &c) && GetClientRect(g_wnd, &r);
+        logf("menu: Deck layout press at %.0f,%.0f on the menu; OS cursor %ld,%ld in a %ldx%ld window%s; DirectInput delta %ld,%ld; "
+             "cursor from %s", g_mouse.x, g_mouse.y, c.x, c.y, r.right, r.bottom, read ? "" : " (not read)", dx, dy, di ? "DirectInput" : "OS");
+    }
     if (logNow) {
         logf("menu input: cursor %s; DirectInput mouse: state reads %u of 16 bytes, %u of 20, %u of another size (last %u "
              "bytes); %u buffered reads, %u events, offsets %08x, %u button-down reads; OS button-down frames %u; presses "
@@ -1116,6 +1386,17 @@ bool menuInit(ID3D12Device* dev, ID3D12CommandQueue* queue, HWND wnd, UINT heigh
     }
     if (ad) ad->Release();
     if (f4) f4->Release();
+    char env[8] = "";
+    const DWORD envLen = GetEnvironmentVariableA("SteamDeck", env, sizeof env);
+    const char* steamDeck = envLen && envLen < sizeof env ? env : nullptr;
+    g_isDeck = deck::isSteamDeck(ad1.VendorId, ad1.DeviceId, steamDeck);
+    g_layout = deck::layoutValue(iniGet(L"overlay", L"layout", 0));
+    g_deckFontK = height ? height / 800.f : 1.f;
+    char why[32];
+    snprintf(why, sizeof why, g_isDeck ? "%s" : "SteamDeck %s", g_isDeck ? deck::foundBy(ad1.VendorId, ad1.DeviceId, steamDeck) : steamDeck ? steamDeck : "unset");
+    static const char* const kLayoutNames[] = { "Automatic", "Steam Deck", "Desktop" };
+    logf("menu: adapter %04x:%04x, Steam Deck %s (%s), layout %s", ad1.VendorId, ad1.DeviceId, g_isDeck ? "found" : "not found", why,
+         kLayoutNames[g_layout]);
     g_counter = iniGet(L"overlay", L"enable", 1) != 0;
     g_corner = std::clamp(iniGet(L"overlay", L"corner", 0), 0, 3);
     if (!g_native) {
@@ -1220,11 +1501,14 @@ bool compose(IDXGISwapChain3* sc, UINT index, bool layer) {
             pad::stickPast(g_padView.ly, 1) || pad::stickPast(g_padView.ly, -1))
             g_padUsed = true;
     } else if (g_padRelease) { pad::releasePad(io); g_padRelease = false; }
+    // the Steam Deck layout moves its own focus, so ImGui's must not move too; the desktop menu gets it back
+    if (g_open && g_deckOpen) io.ConfigFlags &= ~ImGuiConfigFlags_NavEnableGamepad;
+    else io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
     if (g_native) ImGui_ImplDX11_NewFrame();
     else ImGui_ImplDX12_NewFrame();
     ImGui::NewFrame();
     if (g_counter) drawCounter();
-    if (g_open) drawMenu();
+    if (g_open) { if (g_deckOpen) drawDeckMenu(); else drawMenu(); }
     ImGui::Render();
     ImDrawData* dd = ImGui::GetDrawData();
 

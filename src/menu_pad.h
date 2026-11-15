@@ -14,7 +14,7 @@ namespace pad {
 
 // Controller button bits as XInput reports them (menu.cpp checks them against Xinput.h)
 constexpr uint16_t kUp = 0x0001, kDown = 0x0002, kLeft = 0x0004, kRight = 0x0008, kL3 = 0x0040, kR3 = 0x0080,
-                   kA = 0x1000, kB = 0x2000;
+                   kL1 = 0x0100, kR1 = 0x0200, kA = 0x1000, kB = 0x2000;  // L1 / R1: the Steam Deck layout's pages
 constexpr uint64_t kFreshMs = 250;    // a pad not read for longer than this is left out
 constexpr uint64_t kHoldMs = 500;     // how long both sticks are held in to open or close the menu
 constexpr int kStickDeadzone = 7849;  // the left stick's dead zone, as XInput defines it
