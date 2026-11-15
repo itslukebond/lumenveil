@@ -45,14 +45,14 @@ def problems(src, lk, ph):
     row = inline(lk, 'row')
     if None in (menu, comp, count, ctr, style, row): return ['drawMenu, compose, menuCount, drawCounter, applyStyle or look::row not found']
     m = code(menu)
-    # the panel: one fixed size that never scrolls, so no scrollbar for the panel to cover (review finding 4)
+    # the panel: one fixed size that never scrolls, so no scrollbar for the panel to cover
     if not re.search(r'ImGuiWindowFlags_NoResize \| ImGuiWindowFlags_NoScrollbar \|', m) or not re.search(r'look::panel\(dl, wa, wb, look::kMenu\);', m):
         out.append('the menu panel can scroll')
     # the release number in the footer, from CMakeLists.txt's project VERSION
     if not re.search(r'const char\* ver = "Lumenveil " LUMENVEIL_VERSION;\n[^\n]*\n\s*dl->AddText\([^\n]*\bver\);', m): out.append('the menu does not show the release number')
     # the trademark lines, smaller than the notes
     if not re.search(r'look::fineText\("Uses NVIDIA DLSS[^;]*, 11\);', m): out.append('the trademark lines are not in the fine text')
-    # sliders: every one with its box (AC6), and g_typing set once, after the last box
+    # sliders: every one with its box, and g_typing set once, after the last box
     if 'padSlider(' in m: out.append('a slider in the desktop menu has no typed box')
     if not re.search(r'const SliderSpec sp = sliderSpec\(r\.id, st\);\n[^\n]*\n\s*if \(pad::typedSlider\("##v", val, sp\.lo, sp\.hi, sp\.step, sp\.fmt, boxW, &typing\)\)', m):
         out.append('the slider rows are not typed sliders')

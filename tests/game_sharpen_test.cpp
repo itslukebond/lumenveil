@@ -1,6 +1,6 @@
 // Host test for src/game_sharpen.h: recognising the game's sharpening pass by a CRC-32 of its bytecode, and the
 // setting's rules (0 to 200 percent, default 100 when missing or out of range). Expected values are the standard
-// CRC-32 check values and the spec's numbers, not the code's.
+// CRC-32 check values and the numbers written out here, not the code's.
 #include "game_sharpen.h"
 #include <cstdio>
 #include <cstring>

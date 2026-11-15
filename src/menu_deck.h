@@ -1,6 +1,6 @@
 // The Insert menu's Steam Deck layout, kept free of Windows types so tests/menu_deck_test.cpp covers it on the host:
 // detection, the Layout setting and its live change (Portable mode), the controller's steps and focus, and the widgets.
-// The layout is the signed-off 1280x800 design (a 760x768 panel: logo and layout button, tab bar with L1 / R1, one page
+// The layout is a 1280x800 design (a 760x768 panel: logo and layout button, tab bar with L1 / R1, one page
 // of rows in fixed slots, the help box, the status line, footer), drawn at min(width / 1280, height / 800) and centred,
 // in the desktop menu's look (menu_look.h) at its own sizes. Each row is one invisible button with a fixed rect drawn through the draw list, so rows never move, and a
 // dimmed row keeps its place but takes no input.

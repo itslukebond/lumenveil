@@ -1,10 +1,10 @@
 // Host test for src/menu_pages.h, the page model both menu layouts draw from: the rows of each page across the state
 // matrix, the short values, the help box's lines and flags, the status line and the page keys; then the fit test with
-// the bundled TeX Gyre Adventor at both layouts' sizes. Expected values come from the spec
-// (docs/changes 2026-11-15-menu-cleanup-layout-button: Expected behaviour, AC6 to AC15 and the note table), not the code.
+// the bundled TeX Gyre Adventor at both layouts' sizes. Expected values are written out
+// here (the intended rows, values, help texts and status line), not taken from the code.
 // Usage: menu_pages_test <path to texgyreadventor-regular.otf>
 #include "menu_pages.h"
-#include "menu_deck.h"  // the Portable label slot and the desktop controller footer (review findings 5 and 7)
+#include "menu_deck.h"  // the Portable label slot and the desktop controller footer
 #include "imgui.h"
 #include <algorithm>
 #include <cstdio>
@@ -46,7 +46,7 @@ static State amdPc() {  // a Radeon running FSR and FSR frame generation, Anti-L
     return s;
 }
 
-// AC9: the same rows for the same state, whichever layout (the model takes no layout); the Portable layout gains the DLSS
+// the same rows for the same state, whichever layout (the model takes no layout); the Portable layout gains the DLSS
 // rows wherever the desktop shows them.
 static void rowSets() {
     State s = nvidiaPc();
@@ -89,7 +89,7 @@ static std::string val(Id id, const State& s) {
     const Value v = value(id, s);
     return *v.rest ? std::string(v.main) + " | " + v.rest : std::string(v.main);
 }
-// AC10: short values, the resolved part separate (drawn dim after a dot).
+// short values, the resolved part separate (drawn dim after a dot).
 static void values() {
     State s = nvidiaPc();
     CHECK(val(kUpscaler, s) == "Auto | DLSS");
@@ -133,7 +133,7 @@ static void values() {
     a.sharp = 40; CHECK(val(kSharpening, a) == "40%");
 }
 
-// AC12, AC13, AC14: one case per row of the note table, with tone and flag; amber wins over green.
+// one case per help note, with tone and flag; amber wins over green.
 static void helpLines() {
     State s = nvidiaPc();
     Help h = help(kUpscaler, s);
@@ -229,7 +229,7 @@ static void helpLines() {
     for (int id = 0; id < kIdCount; ++id) { h = help(Id(id), al); CHECK(h.n >= 1 && h.n <= kHelpLines); }
 }
 
-// AC15: the status line's pieces.
+// the status line's pieces.
 static void statusLine() {
     Status st = status(nvidiaPc());
     CHECK(std::string(st.up) == "DLSS 310.9.16"); CHECK(st.upVendor == 0);
@@ -244,12 +244,12 @@ static void statusLine() {
     n.upOn = false; CHECK(std::string(status(n).up) == "Upscaling off");
 }
 
-// AC6: pages wrap both ways.
+// pages wrap both ways.
 static void pageKeys() {
     CHECK(turn(2, 1) == 0); CHECK(turn(0, -1) == 2); CHECK(turn(1, 1) == 2);
 }
 
-// AC10, AC14, AC15: everything fits, measured with the bundled font at each layout's sizes.
+// everything fits, measured with the bundled font at each layout's sizes.
 static std::vector<State> states() {
     std::vector<State> v;
     for (int vendor = 0; vendor < 3; ++vendor)
@@ -312,7 +312,7 @@ static void fit(const char* fontPath) {
             widestStatus = std::max(widestStatus, sw / z.statusW);
             if (sw > z.statusW) { std::snprintf(m, sizeof m, "status %s is %.0f wide in %.0f", t, sw, z.statusW); say(m); }
         }
-        // the worst status the spec names
+        // the widest status the menu can show
         const char* worst = "DLSS 310.10.100   3840\xC3\x97" "2160 \xE2\x86\x92 3840\xC3\x97" "2160   Frame generation waiting for gameplay";
         CHECK(f->CalcTextSizeA(z.statusPx, FLT_MAX, 0, worst).x <= z.statusW);
     }

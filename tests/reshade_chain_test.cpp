@@ -1,5 +1,5 @@
 // Host test for src/reshade_chain.h: whether Lumenveil loads the ReShade it kept as dxgi.dll.before_ffxv_dlss, and the
-// reason it logs when it does not. Expected values come from the spec (load=0 stops it, a missing kept file, and a kept
+// reason it logs when it does not. Expected values are the intended behaviour (load=0 stops it, a missing kept file, and a kept
 // file whose ProductName is not exactly "ReShade" after trimming, case ignored), not from the code.
 #include "reshade_chain.h"
 #include <cstdio>

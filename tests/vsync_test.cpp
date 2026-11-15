@@ -1,5 +1,5 @@
 // Host test for src/vsync_rules.h: the frame cap our presenter holds when the game asks for VSync, and when the stall
-// watchdog logs. Expected values come from the spec (docs/changes vsync-hang-windows: with VSync on the cap is the
+// watchdog logs. Expected values are written out here (with VSync on the cap is the
 // menu's custom cap if lower, else the auto cap, never uncapped; with VSync off it is as in 1.0.1: Auto = the auto
 // cap, Off = 0, Custom = itself; a stall is 3 s with no new present, logged once, then once when presents resume).
 // Menu cap values: -1 Auto, 0 Off, above 0 a custom fps.
@@ -26,7 +26,7 @@ static void cap() {
 }
 
 static void route() {
-    // The interval our swap chain presents at (the spec's review findings 1 and 2): Windows on our own or Streamline's
+    // The interval our swap chain presents at: Windows on our own or Streamline's
     // swap chain always 0; under Wine/Proton, or on FSR's or XeSS's frame generation swap chain, the game's own.
     CHECK(vsyncInterval(1, false, false) == 0);
     CHECK(vsyncInterval(2, false, false) == 0);

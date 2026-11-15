@@ -1,6 +1,6 @@
 // Host test for src/menu_look.h: the desktop menu's look helpers (option stepping, toggle animation timings, the frame
 // time graph's samples, scale and x placement, the counter's text and width) and the option row driven by keyboard,
-// controller and mouse in a headless Dear ImGui context. Expected values come from the spec's acceptance criteria
+// controller and mouse in a headless Dear ImGui context. Expected values are the intended behaviour
 // (0.18 s with a peak of 1.05..1.15, a pulse of 1 to 1.9 over 0.42 s, 0.12 s off, a 0.2 s time constant, a 2 s window,
 // 22 px arrow slots, 230 px minimum width), written out here, not recomputed the way the code does.
 #include "menu_look.h"
@@ -293,7 +293,7 @@ static void sliderBox() {
 }
 
 // A box whose idle text has a unit ("240 fps"): from the click that starts typing, the box holds the digits only, so
-// editing part of the number and pressing Enter sets it (review finding 1: Home, Delete, "1", Enter gives 140).
+// editing part of the number and pressing Enter sets it (Home, Delete, "1", Enter gives 140).
 static int g_cap = 240;
 static ImVec2 g_capMin, g_capMax;
 static void capFrame() {
@@ -325,8 +325,8 @@ static void boxActivation() {
     ImGui::DestroyContext();
 }
 
-// The menu's panel leaves the scrollbar's gutter out of its fill, so the scrollbar drawn before it stays visible (review
-// finding 4): with contents taller than the window the fill stops at the scrollbar's left edge; with no scrollbar it
+// The menu's panel leaves the scrollbar's gutter out of its fill, so the scrollbar drawn before it stays visible: with
+// contents taller than the window the fill stops at the scrollbar's left edge; with no scrollbar it
 // reaches the window's right edge.
 static bool g_tall;
 static float g_fillEnd, g_barX, g_winR, g_winTop, g_winBot;

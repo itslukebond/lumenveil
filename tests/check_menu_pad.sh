@@ -59,8 +59,8 @@ def problems(src, hdr):
     if re.search(r'g_open = (false|!g_open)|g_open\.store\(false', rest): out.append('the menu closes somewhere other than closeMenu')
     if 'closeMenu();' not in code(poll): out.append('pollToggle does not close through closeMenu')
     if 'combo.update(' not in code(poll): out.append('pollToggle does not time the stick combo')
-    # B with the menu open and nothing busy closes it (AC7); the menu runs one ImGui frame after any close, even with the
-    # counter off, so the pad keys are released and the window reopens on its first setting (AC5)
+    # B with the menu open and nothing busy closes it; the menu runs one ImGui frame after any close, even with the
+    # counter off, so the pad keys are released and the window reopens on its first setting
     pc = code(poll)
     if not re.search(r'bClose = g_open && !g_padBusy && \(g_padView\.edges & pad::kB\);', pc) or \
        not re.search(r'if \([^\n]*\|\| bClose\) \{', pc): out.append('B does not close the idle menu')

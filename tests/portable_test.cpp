@@ -1,7 +1,6 @@
 // Host test for the layout button, the live layout change, the pointing glove and the Portable layout's look
-// (src/menu_look.h, src/menu_deck.h, src/menu_pad.h) in a headless Dear ImGui context. Expected values come from the
-// specs (docs/changes 2026-11-15-menu-cleanup-layout-button: AC1 to AC5 and AC17; 2026-11-15-portable-mode-deck-restyle
-// for the glove) and the signed-off mockups: a click or tap on the unlit half switches, on the lit half nothing; left /
+// (src/menu_look.h, src/menu_deck.h, src/menu_pad.h) in a headless Dear ImGui context. Expected values are the intended
+// behaviour and the design's sizes and colours: a click or tap on the unlit half switches, on the lit half nothing; left /
 // right pick a half and A, Space or Enter the other layout; Up from the first row reaches the button and Down comes back;
 // the change lands on the next frame with the button focused; the glove's 40 x 24 grid at 0.6 (24 x 14.4) on the desktop
 // and 0.9 (36 x 21.6) on the Deck, its colours and the 1.1 s sway of 0 to 2 px; labels 48 px into a Deck row; rows in
@@ -20,7 +19,7 @@ static int g_fail;
 static bool near(double a, double b, double eps = 1e-3) { return std::fabs(a - b) <= eps; }
 static ImFont* g_font;
 
-// ---- the pending change (AC2, AC4) --------------------------------------------------------------------------------
+// ---- the pending change --------------------------------------------------------------------------------
 static void swap() {
     deck::Swap s;
     CHECK(!s.due(0)); CHECK(!s.due(100));
@@ -61,7 +60,7 @@ static bool hasColour(const ImDrawList* dl, int from, int to, ImU32 c) {
 
 static void mouse(float x, float y, bool down) { ImGuiIO& io = ImGui::GetIO(); io.AddMousePosEvent(x, y); io.AddMouseButtonEvent(0, down); }
 
-// ---- the desktop layout button (AC1, AC2, AC3) ---------------------------------------------------------------------
+// ---- the desktop layout button ---------------------------------------------------------------------
 // The desktop menu's top: the button at the top bar's right, the tabs (never navigation stops) and two rows.
 struct Desk {
     bool portable = false, enabled = true, focusAfter = false, cursor = false;
@@ -109,12 +108,12 @@ static void desktopButton() {
     d = Desk{};
     deskFrame(); deskFrame();
     const ImVec2 left(d.btn.Min.x + d.btn.GetWidth() * 0.25f, d.btn.GetCenter().y), right(d.btn.Min.x + d.btn.GetWidth() * 0.75f, left.y);
-    // AC1: square (2 px corners), the lit half's 1 px #a9c8ff underline under Desktop while Desktop is shown
+    // square (2 px corners), the lit half's 1 px #a9c8ff underline under Desktop while Desktop is shown
     ImDrawList* dl = windowList("desk");
     float ux0 = 1e9f, ux1 = -1e9f;
     for (int i = d.vtx0; i < d.vtx1; ++i) if (dl->VtxBuffer[i].col == rgb(0xa9, 0xc8, 0xff)) { ux0 = std::min(ux0, dl->VtxBuffer[i].pos.x); ux1 = std::max(ux1, dl->VtxBuffer[i].pos.x); }
     CHECK(near(ux0, d.btn.Min.x, 0.6)); CHECK(near(ux1, d.btn.GetCenter().x, 1.1));
-    // AC2: a click on the lit half does nothing; on the unlit half it asks for that layout
+    // a click on the lit half does nothing; on the unlit half it asks for that layout
     click(left); CHECK(d.picks == 0);
     click(right); CHECK(d.picks == 1); CHECK(d.last == 1);
     d.portable = true; deskFrame();
@@ -126,7 +125,7 @@ static void desktopButton() {
     click(left); CHECK(d.picks == 2); CHECK(d.last == 0);
     d.portable = false;
     mouse(-100, -100, false); deskFrame();
-    // AC3: with the focus on it, A, Space and Enter ask for the other layout; right picks Portable, left Desktop (shown:
+    // with the focus on it, A, Space and Enter ask for the other layout; right picks Portable, left Desktop (shown:
     // nothing)
     focusButton();
     CHECK(GImGui->NavId == d.btnId);
@@ -143,7 +142,7 @@ static void desktopButton() {
     key(ImGuiKey_LeftArrow); CHECK(d.picks == 6); CHECK(d.last == 0);
     key(ImGuiKey_GamepadFaceDown); CHECK(d.picks == 7); CHECK(d.last == 0);
     d.portable = false; deskFrame();
-    // AC3: Up from the first row reaches the button (the tabs are no stops), Down comes back to the first row
+    // Up from the first row reaches the button (the tabs are no stops), Down comes back to the first row
     focusId(d.row0); CHECK(GImGui->NavId == d.row0);
     key(ImGuiKey_UpArrow); CHECK(GImGui->NavId == d.btnId);
     key(ImGuiKey_DownArrow); CHECK(GImGui->NavId == d.row0);
@@ -242,7 +241,7 @@ static DeckOut deckFrame(int page, int focus = 0, bool a = false, int lr = 0) {
 }
 
 // The Portable layout's button: a tap on the unlit half picks it, on the lit half nothing; with the focus on it, left /
-// right pick a half and A the other layout; without the focus, nothing (AC2, AC3).
+// right pick a half and A the other layout; without the focus, nothing.
 static void deckButton() {
     deckFrame(0); deckFrame(0);
     DeckOut o = deckFrame(0);
@@ -261,7 +260,7 @@ static void deckButton() {
     CHECK(deckFrame(0, deck::kButton, false, -1).pick == 0);                // left: Desktop
     CHECK(deckFrame(0, deck::kButton, true).pick == 0);                     // A: the other layout
     CHECK(deckFrame(0, 0, true, -1).pick == -1);                            // the focus on a row: nothing
-    // the focus: up from the first row to the button, down back; a page change starts on the first row (AC3, AC7)
+    // the focus: up from the first row to the button, down back; a page change starts on the first row
     deck::Nav n;
     n.move(6, -1); CHECK(n.focus[0] == deck::kButton);
     n.move(6, -1); CHECK(n.focus[0] == deck::kButton);
@@ -274,7 +273,7 @@ static void deckButton() {
     n.focus[1] = 3; n.show(1); CHECK(n.focus[1] == 3);                      // the page shown: unchanged
 }
 
-// ---- the layout change, in compose's order (AC2, AC4, AC5) ------------------------------------------------------------
+// ---- the layout change, in compose's order ------------------------------------------------------------
 struct App {
     bool open = true, deckOpen = false, padUsed = true, focusDesk = false;
     int layout = 0, iniLayout = 0, iniWrites = 0, picksDesk = 0, picksDeck = 0, otherPresses = 0;
@@ -354,7 +353,7 @@ static void change() {
     appFrame(padState(pad::kA));                                  // the next frame: the desktop menu
     CHECK(!a.deckOpen); CHECK(a.open);                            // the menu stays open
     frames(3, padState(pad::kA));                                 // A still held
-    CHECK(GImGui->NavId == a.btnId);                              // its button focused (AC4)
+    CHECK(GImGui->NavId == a.btnId);                              // its button focused
     CHECK(GImGui->NavCursorVisible);                              // the controller has been used: the cursor shows
     CHECK(a.picksDesk == 0); CHECK(a.otherPresses == 0);          // the held A acted once only
     frames(2, padState(0));                                       // let go
@@ -426,7 +425,7 @@ static void change() {
     CHECK(!a.deckOpen);
 }
 
-// ---- the glove (AC7, AC8) ----------------------------------------------------------------------------------------
+// ---- the glove ----------------------------------------------------------------------------------------
 static void gloveShape() {
     ImGui::NewFrame();
     ImGui::SetNextWindowPos(ImVec2(0, 0)); ImGui::SetNextWindowSize(ImVec2(300, 200));
@@ -448,7 +447,7 @@ static void gloveShape() {
         CHECK(minX >= o.x - 0.6f && maxX <= o.x + 40 * unit + 0.6f);
         CHECK(minY >= o.y - 0.6f && maxY <= o.y + 24 * unit + 0.6f);
         CHECK(maxX - minX > 35 * unit && maxY - minY > 15 * unit);  // and it fills it: a hand, not a dot
-        // the mockup's colours
+        // the design's colours
         CHECK(hasColour(dl, a, b, rgb(0xff, 0xff, 0xff))); CHECK(hasColour(dl, a, b, rgb(0xcf, 0xd8, 0xe4)));
         CHECK(hasColour(dl, a, b, rgb(0xf2, 0xf5, 0xfa))); CHECK(hasColour(dl, a, b, rgb(0xe6, 0xeb, 0xf2)));
         CHECK(hasColour(dl, a, b, rgb(0x26, 0x30, 0x3d))); CHECK(hasColour(dl, a, b, rgb(0x9a, 0xa7, 0xb8)));
@@ -541,7 +540,7 @@ static void gloveRows() {
     mouse(-100, -100, false);
 }
 
-// ---- the Portable look (AC1, AC17) --------------------------------------------------------------------------------
+// ---- the Portable look --------------------------------------------------------------------------------
 static void deckLook() {
     static const int kRowsOnPage[3] = { 6, 7, 3 };
     for (const ImVec2 sz : { ImVec2(1280, 800), ImVec2(1920, 1080) }) {

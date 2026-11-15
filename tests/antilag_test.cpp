@@ -1,5 +1,5 @@
 // Host test for src/antilag_rules.h: when AMD Radeon Anti-Lag 2 is available, when it runs, and when the menu shows its
-// section. Expected values come from the spec's truth tables (docs: vendor 0x1002 is AMD, E_HANDLE means AMD's driver
+// section. Expected values come from written-out truth tables (vendor 0x1002 is AMD, E_HANDLE means AMD's driver
 // extension is not loaded, frame generation backends 0 DLSS-G, 1 FSR, 2 XeSS, -1 none), not from the code.
 #include "antilag_rules.h"
 #include <cstdio>

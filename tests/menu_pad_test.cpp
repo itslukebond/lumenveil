@@ -1,6 +1,6 @@
 // Host test for src/menu_pad.h: the controller combo that opens the Insert menu, the latch that keeps a button held at
 // the close from reaching the game, and the menu driven only by controller input in a headless Dear ImGui context.
-// Expected values come from the spec (docs: hold 500 ms, steps 1 and 5, the hint words), not from the code.
+// Expected values are written out here (hold 500 ms, steps 1 and 5, the hint words), not taken from the code.
 #include "menu_pad.h"
 #include "imgui_internal.h"
 #include <cstdio>
@@ -194,7 +194,7 @@ static void navigation() {
     frame(tapOf(kB), false); s = idle();
     CHECK(!s.popup);
 
-    // holding down on the D-pad or the stick moves one setting per press, however long it is held (AC5)
+    // holding down on the D-pad or the stick moves one setting per press, however long it is held
     tap(kUp); tap(kUp);
     CHECK(idle().focused == 0);
     PadView held; held.connected = true; held.edges = held.buttons = kDown;
@@ -212,7 +212,7 @@ static void navigation() {
     for (int i = 0; i < 3; ++i) frame(tilt);          // back to centre, then down again: one more
     CHECK(idle().focused == 2);
 
-    // A on the slider (as the footer offers), then left/right: still the slider's own step of 5 (AC6)
+    // A on the slider (as the footer offers), then left/right: still the slider's own step of 5
     tap(kUp);
     g_slider = 50;
     s = tap(kA);
@@ -239,7 +239,7 @@ static void navigation() {
     io.AddMousePosEvent(-FLT_MAX, -FLT_MAX); idle(1);
     g_slider = 50;
 
-    // closed for a single frame (the release frame), the combo reopens the menu on its first setting (AC5)
+    // closed for a single frame (the release frame), the combo reopens the menu on its first setting
     tap(kDown); tap(kDown); tap(kUp);
     CHECK(idle().focused == 1);
     g_drawn = false; frame(PadView{});
@@ -262,7 +262,7 @@ static void navigation() {
 
 // Empty controller slots: an answer of "not connected" is reused until the slot's re-ask time (slot 0 1 s, slot 1 2 s,
 // slot 2 3 s, slot 3 4 s, from the read that got it); a connected slot is always asked; the counts are logged once,
-// 30 s after the first read. Numbers are the spec's, written out here.
+// 30 s after the first read. Numbers are written out here.
 static void emptySlots() {
     const uint64_t wait[4] = { 1000, 2000, 3000, 4000 };
     for (unsigned i = 0; i < 4; ++i) {

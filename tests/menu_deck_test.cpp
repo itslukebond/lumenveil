@@ -1,7 +1,7 @@
 // Host test for src/menu_deck.h: Steam Deck detection, the Layout setting, the Deck layout's scale, its controller
-// steps and its rows driven by the mouse in a headless Dear ImGui context. Expected values come from the spec
-// (docs/changes 2026-11-13-steam-deck-ui-mode: the PCI IDs, the setting's values, 1280x800 at scale 1, steps of 5,
-// the signed-off mockup's 760x768 panel), not from the code.
+// steps and its rows driven by the mouse in a headless Dear ImGui context. Expected values are written out
+// here (the PCI IDs, the setting's values, 1280x800 at scale 1, steps of 5, the design's 760x768 panel), not taken
+// from the code.
 #include "menu_deck.h"
 #include "imgui_internal.h"
 #include <cstdio>
@@ -61,7 +61,7 @@ static void steps() {
     CHECK(listStep(ups, 3, -1, 1) == 1); CHECK(listStep(ups, 3, 2, 1) == -1); CHECK(listStep(ups, 3, -1, -1) == 2);
     CHECK(listStep(ups, 3, 1, 0) == 1);
     // the focus: one row per press, up from the first row to the layout button (-1) and no further, down to the last
-    // row; pages wrap both ways and every page change starts on the first row (2026-11-15-menu-cleanup AC3, AC7)
+    // row; pages wrap both ways and every page change starts on the first row
     Nav n;
     n.move(4, -1); CHECK(n.focus[0] == kButton);
     n.move(4, -1); CHECK(n.focus[0] == kButton);

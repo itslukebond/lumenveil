@@ -1,6 +1,6 @@
 // Host test for where a layout change lands (src/menu_deck.h deck::landFocus, src/menu_look.h look::takeFocus), the
-// same functions the menu calls, in a headless Dear ImGui context. Expected values come from the spec (docs/changes
-// 2026-11-15-menu-cleanup-layout-button, AC4): the Portable layout keeps its page with the layout button focused (focus
+// same functions the menu calls, in a headless Dear ImGui context. Expected values are the intended
+// behaviour: the Portable layout keeps its page with the layout button focused (focus
 // -1); the desktop menu opens with its layout button focused, the nav cursor shown only when a controller has been used;
 // with no change pending the button takes no focus.
 #include "menu_deck.h"
