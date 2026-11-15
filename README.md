@@ -164,7 +164,8 @@ the release) goes through it step by step, and shows how to install by hand if a
 ## Using the mod (Insert key)
 
 Press **Insert** at any time in game to open or close the mod's menu. Changes apply straight away unless the menu says
-otherwise, and they're saved to `ffxv_dlss.ini` next to the game.
+otherwise, and they're saved to `ffxv_dlss.ini` next to the game. The arrow keys move between settings (up and down)
+and change them (left and right); Enter or Space opens a list, and a slider's value can also be typed into its box.
 
 With a controller, hold both sticks in (L3 and R3) for half a second to open or close the menu. Use the D-pad or left
 stick to move, A to change a setting and B to close a list or the menu. On a Steam Deck this works without a keyboard.
@@ -189,7 +190,7 @@ bottom of the normal menu.
 | **Reflex** | Off, On, or On + Boost, with DLSS Frame Generation. Frame Generation keeps Reflex on. With XeSS Frame Generation this section is Intel's Xe Low Latency instead, which stays on while frame generation is enabled. On an AMD Radeon card with FSR, it is AMD Radeon Anti-Lag 2 instead, Off or On, off by default. |
 | **Frame cap** | Off, Auto or Custom. Auto caps just under your display's refresh rate, so G-Sync, FreeSync or Adaptive Sync stays engaged. Pair it with V-Sync on in your driver's control panel. |
 | **Sharper HUD** | On by default. Crisper HUD text, icons and title screen at 4K, at a small cost in frame rate. Untick it for a little more fps. |
-| **FPS counter** | Show or hide the counter and pick its corner. It shows the fps you see and the base fps the game renders. |
+| **FPS counter** | Show or hide the counter and pick its corner. It shows the fps you see and the base fps the game renders, the frame time of each in milliseconds, and a graph of the last two seconds of frame times. |
 | **Layout** | Automatic, Steam Deck or Desktop. Automatic uses the larger Steam Deck layout on a Steam Deck and the normal menu everywhere else. On another handheld, such as a ROG Ally or Legion Go, pick Steam Deck here. A change applies the next time the menu opens. |
 
 <p align="center">

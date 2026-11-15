@@ -8,6 +8,7 @@
 #include "fg_select.h"
 #include "menu_buttons.h"
 #include "menu_pad.h"
+#include "menu_look.h"
 #include "menu_deck.h"
 #include "game_config.h"
 #include "xess_rules.h"
@@ -18,6 +19,9 @@
 #include <dxgi1_6.h>
 #include <d3dcompiler.h>
 #define DIRECTINPUT_VERSION 0x0800
+#ifndef LUMENVEIL_VERSION
+#error LUMENVEIL_VERSION comes from CMakeLists.txt (project VERSION)
+#endif
 #include <dinput.h>
 #include <wincodec.h>
 #include <Xinput.h>
@@ -71,6 +75,7 @@ D3D12_RECT g_nativeBox;           // this frame's area drawn in, from compose
 NativeTargetKey g_nativeBuilt;    // the back buffer g_tex11 was built for
 unsigned g_nativeDrawn, g_nativeAcquired;
 ImFont *g_font, *g_big, *g_bigThin;  // g_bigThin: base fps, lighter than the bold output fps
+ImFont* g_small;                     // the desktop menu's notes and footer, the counter's units and lines
 const char* g_fontName = "ImGui default";
 char g_gpu[64];  // e.g. "RTX 4070": the adapter's name without the vendor prefix, for the counter
 UINT g_vendorId;  // adapter PCI vendor: 0x10DE NVIDIA, 0x1002 AMD, 0x8086 Intel
@@ -110,6 +115,8 @@ int g_corner;                                   // 0 top-left, 1 top-right, 2 bo
 unsigned g_rendered, g_shown;
 LARGE_INTEGER g_statStart;
 float g_fpsRendered, g_fpsShown;
+// presented frame times for the counter's graph: written by menuCount, read by drawCounter, on the same thread
+look::FrameRing g_frames;
 
 // DirectInput mouse, accumulated on whatever thread the game polls from
 std::mutex g_inMx;
@@ -498,6 +505,8 @@ void loadFonts() {
     if (!(g_bigThin = load(mod + L"texgyreadventor-regular.otf", std::round(38 * g_scale)))) g_bigThin = load(sys + L"segoeui.ttf", std::round(40 * g_scale));
     if (!g_big) g_big = g_font;
     if (!g_bigThin) g_bigThin = g_big;
+    if (!(g_small = load(mod + L"texgyreadventor-regular.otf", std::round(13 * g_scale)))) g_small = load(sys + L"segoeui.ttf", std::round(14 * g_scale));
+    if (!g_small) g_small = g_font;
     {  // the Steam Deck layout's 26, 24 and 19 px, after the desktop's fonts, which stay as they were
         cfg.OversampleH = cfg.OversampleV = 1;  // large sizes need none; keeps the atlas small
         ImFont** deckFonts[3] = { &g_deck26, &g_deck24, &g_deck19 };
@@ -537,7 +546,7 @@ void applyStyle() {
     s.ScaleAllSizes(g_scale);
 }
 
-const ImVec4 kGreen(0.62f, 0.90f, 0.20f, 1), kGrey(0.62f, 0.65f, 0.70f, 1), kAmber(1.0f, 0.75f, 0.25f, 1);
+const ImVec4 kAmber(1.0f, 0.75f, 0.25f, 1);
 
 // Accent colours: a vendor's own on the controls that belong to it (NVIDIA green, AMD red, Intel blue), neutral grey on
 // the game's and the mod's own settings. One row per vendor.
@@ -548,21 +557,6 @@ const Accent kAccents[] = {
     { ImVec4(0.86f, 0.10f, 0.13f, 1), ImVec4(0.96f, 0.24f, 0.26f, 1) },
     { ImVec4(0.00f, 0.443f, 0.773f, 1), ImVec4(0.180f, 0.608f, 0.918f, 1) },
     { ImVec4(0.59f, 0.62f, 0.67f, 1), ImVec4(0.83f, 0.85f, 0.88f, 1) },
-};
-// Ticks, slider grabs, combo arrows and list selection take the vendor's colour until the end of the scope.
-struct AccentScope {
-    explicit AccentScope(Vendor v) {
-        const ImVec4 a = kAccents[v].base, h = kAccents[v].hi;
-        const ImGuiCol tinted[] = { ImGuiCol_Header, ImGuiCol_HeaderHovered, ImGuiCol_HeaderActive, ImGuiCol_Button, ImGuiCol_ButtonHovered, ImGuiCol_ButtonActive };
-        const float alpha[] = { 0.25f, 0.35f, 0.45f, 0.25f, 0.35f, 0.45f };
-        ImGui::PushStyleColor(ImGuiCol_CheckMark, h);
-        ImGui::PushStyleColor(ImGuiCol_SliderGrab, a);
-        ImGui::PushStyleColor(ImGuiCol_SliderGrabActive, h);
-        for (int i = 0; i < 6; ++i) ImGui::PushStyleColor(tinted[i], ImVec4(a.x, a.y, a.z, alpha[i]));
-    }
-    ~AccentScope() { ImGui::PopStyleColor(9); }
-    AccentScope(const AccentScope&) = delete;
-    AccentScope& operator=(const AccentScope&) = delete;
 };
 
 // Upscalers by id (0 DLSS, 1 FSR, 2 XeSS) and frame generation backends by id (0 DLSS-G, 1 FSR, 2 XeSS), one row each. The vendors'
@@ -594,52 +588,143 @@ constexpr int kUpscalerCount = IM_ARRAYSIZE(kUpscalers), kBackendCount = IM_ARRA
 Vendor backendVendor(int b) { return b >= 0 && b < kBackendCount ? kBackends[b].vendor : kNeutral; }
 const char* syncName() { return g_vendorId == 0x1002 ? "FreeSync" : g_vendorId == 0x8086 ? "Adaptive Sync" : "G-Sync"; }
 
-// A "tested on" note: grey text with a thin bar in the vendor's colour on its left.
-void testedNote(const char* text, Vendor v) {
-    const float bar = 2 * g_scale, gap = 8 * g_scale;
-    const ImVec2 top = ImGui::GetCursorScreenPos();
-    ImGui::Indent(bar + gap);
-    ImGui::TextDisabled("%s", text);
-    ImGui::Unindent(bar + gap);
-    ImGui::GetWindowDrawList()->AddRectFilled(top, { top.x + bar, ImGui::GetItemRectMax().y }, ImGui::GetColorU32(kAccents[v].base));
+// A note under a setting: the small font in `c`, indented to the setting names, wrapping at the window edge.
+void note(const ImVec4& c, const char* fmt, ...) IM_FMTARGS(2);
+void note(const ImVec4& c, const char* fmt, ...) {
+    ImGui::PushFont(g_small);
+    ImGui::Indent(22 * g_scale);
+    ImGui::PushStyleColor(ImGuiCol_Text, c);
+    va_list a;
+    va_start(a, fmt);
+    ImGui::TextV(fmt, a);
+    va_end(a);
+    ImGui::PopStyleColor();
+    ImGui::Unindent(22 * g_scale);
+    ImGui::PopFont();
+}
+// A "tested on" note.
+void testedNote(const char* text) { note(look::kDim, "%s", text); }
+
+// The counter's frame time graph in a..b: one point per presented frame at its age over 2 s, redrawn every frame, the
+// vertical scale eased toward max(average x 2.2, highest x 1.1) so a stutter does not make the line jump.
+void drawGraph(ImDrawList* dl, ImVec2 a, ImVec2 b) {
+    static float yTop;
+    static int lastFrame = -10;  // the frame the graph was last drawn in: a gap restarts the scale at its target
+    const int frame = ImGui::GetFrameCount();
+    LARGE_INTEGER q; QueryPerformanceCounter(&q);
+    const double now = double(q.QuadPart) / (g_freq.QuadPart ? g_freq.QuadPart : 1);
+    const look::FrameRing& r = g_frames;
+    double sum = 0;
+    float most = 0;
+    int n = 0;
+    for (int i = 0; i < r.size(); ++i)
+        if (now - r.time(i) <= 2.0) { sum += r.ms(i); most = std::max(most, r.ms(i)); ++n; }
+    if (n < 2) { lastFrame = -10; return; }
+    const float avg = float(sum / n), want = std::max(avg * 2.2f, most * 1.1f);
+    yTop = frame == lastFrame + 1 ? look::easeScale(yTop, want, ImGui::GetIO().DeltaTime) : want;
+    lastFrame = frame;
+    const float s = g_scale, w = b.x - a.x, h = b.y - a.y;
+    auto y = [&](float ms) { return b.y - 1 - std::min(1.f, ms / yTop) * (h - 3); };
+    ImGui::PushClipRect(a, b, true);
+    const float ay = std::round(y(avg)) + 0.5f;
+    dl->AddLine(ImVec2(a.x, ay), ImVec2(b.x, ay), look::col(look::rgba(205, 215, 228, .16f)), s);
+    static ImVector<ImVec2> pts;
+    pts.resize(0);
+    for (int i = 0; i < r.size(); ++i) pts.push_back(ImVec2(look::ageX(now, r.time(i), a.x, w), y(r.ms(i))));
+    // the fill under the line: a quad per segment, fading toward the bottom
+    const ImVec2 uv = ImGui::GetFontTexUvWhitePixel();
+    const ImU32 clear = look::col(look::rgba(120, 170, 255, 0));
+    auto fill = [&](float yy) { return look::col(look::rgba(120, 170, 255, .28f * std::clamp(1 - (yy - a.y) / h, 0.f, 1.f))); };
+    for (int i = 0; i + 1 < pts.Size; ++i) {
+        const ImVec2 p0 = pts[i], p1 = pts[i + 1];
+        if (p1.x <= p0.x) continue;
+        dl->PrimReserve(6, 4);
+        const ImDrawIdx i0 = ImDrawIdx(dl->_VtxCurrentIdx);
+        dl->PrimWriteVtx(p0, uv, fill(p0.y)); dl->PrimWriteVtx(p1, uv, fill(p1.y));
+        dl->PrimWriteVtx(ImVec2(p1.x, b.y), uv, clear); dl->PrimWriteVtx(ImVec2(p0.x, b.y), uv, clear);
+        dl->PrimWriteIdx(i0); dl->PrimWriteIdx(ImDrawIdx(i0 + 1)); dl->PrimWriteIdx(ImDrawIdx(i0 + 2));
+        dl->PrimWriteIdx(i0); dl->PrimWriteIdx(ImDrawIdx(i0 + 2)); dl->PrimWriteIdx(ImDrawIdx(i0 + 3));
+    }
+    dl->AddPolyline(pts.Data, pts.Size, look::col(look::rgba(120, 170, 255, .25f)), ImDrawFlags_None, 3.5f * s);
+    dl->AddPolyline(pts.Data, pts.Size, look::col(look::rgba(0xa9, 0xc8, 0xff, 1)), ImDrawFlags_None, 1.3f * s);
+    ImGui::PopClipRect();
 }
 
 void drawCounter() {
     const ImGuiViewport* vp = ImGui::GetMainViewport();
-    const float m = 24 * g_scale;
+    const float s = g_scale, m = 24 * s;
+    look::ctx().s = s; look::ctx().fontSmall = g_small;
     const bool right = g_corner & 1, bottom = g_corner & 2;
-    ImGui::SetNextWindowPos({ right ? vp->Size.x - m : m, bottom ? vp->Size.y - m : m }, ImGuiCond_Always, { right ? 1.f : 0.f, bottom ? 1.f : 0.f });
-    ImGui::SetNextWindowBgAlpha(0.62f);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 12 * g_scale);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, { 16 * g_scale, 10 * g_scale });
-    ImGui::Begin("##fps", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_AlwaysAutoResize |
-                                   ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav);
-    const float y = ImGui::GetCursorPosY();
-    auto bigNumber = [y](ImFont* f, float v, const char* unit) {
-        ImGui::SetCursorPosY(y);  // SameLine would inherit the lowered unit label's y
-        ImGui::PushFont(f);
-        ImGui::Text("%.0f", v);
-        ImGui::PopFont();
-        ImGui::SameLine(0, 8 * g_scale);
-        ImGui::SetCursorPosY(y + f->Ascent - g_font->Ascent);  // share the big number's baseline
-        ImGui::TextColored(kGrey, "%s", unit);
-    };
     const FgStatus fg = fgStatus();
     const bool gen = fg.generating && g_fpsRendered > 0;
-    bigNumber(g_big, g_fpsShown, "FPS");
-    if (gen) {  // with FG off both numbers are the same, so base is shown only while generating
-        ImGui::SameLine(0, 20 * g_scale);
-        bigNumber(g_bigThin, g_fpsRendered, "BASE");
-        ImGui::TextColored(kAccents[backendVendor(fg.backend)].hi, "FG %.1f\xC3\x97", g_fpsShown / g_fpsRendered);  // the generating vendor's colour
-    } else ImGui::TextColored(kGrey, fg.available ? "FG off" : "FG n/a");
-    if (*g_gpu) ImGui::TextColored(kGrey, "%s", g_gpu);
-    if (g_w && g_h) ImGui::TextColored(kGrey, "%u\xC3\x97%u", g_w, g_h);  // the screen resolution: the swap chain's size
+    // the lines under the graph
+    char fgLine[32], res[32] = "", verLine[96] = "";
+    if (gen) snprintf(fgLine, sizeof fgLine, "FG %.1f\xC3\x97", g_fpsShown / g_fpsRendered);
+    else snprintf(fgLine, sizeof fgLine, "%s", fg.available ? "FG off" : "FG n/a");
+    if (g_w && g_h) snprintf(res, sizeof res, "%u\xC3\x97%u", g_w, g_h);  // the screen resolution: the swap chain's size
     const DlssInfo di = dlssInfo();
     const int up = di.active == 1 || di.active == 2 ? di.active : 0;  // the upscaler running, else DLSS's version once loaded
     const char* ver = up == 1 ? di.fsrVersion : up == 2 ? di.xessVersion : di.version;
-    if (*ver) ImGui::TextColored(kGrey, dlssEnabled() ? "%s %s" : "%s %s (off)", kUpscalers[up].shortName, ver);
+    if (*ver) snprintf(verLine, sizeof verLine, dlssEnabled() ? "%s %s" : "%s %s (off)", kUpscalers[up].shortName, ver);
+    // one width while the numbers change and with FG on or off: the number slots are "000" wide and BASE always counts
+    ImFont* sm = g_small;
+    auto textW = [](ImFont* f, const char* t) { return f->CalcTextSizeA(f->FontSize, FLT_MAX, 0, t).x; };
+    const float unit = 12 * s, slotFps = textW(g_big, "000"), slotBase = textW(g_bigThin, "000");
+    const float unitFps = look::spacedText(nullptr, sm, unit, ImVec2(0, 0), "FPS", 0.18f, look::kInk2);
+    const float unitBase = look::spacedText(nullptr, sm, unit, ImVec2(0, 0), "BASE", 0.18f, look::kInk2);
+    const float numbersW = slotFps + 7 * s + unitFps + 22 * s + slotBase + 7 * s + unitBase;
+    float widest = 0;
+    for (const char* t : { (const char*)fgLine, (const char*)g_gpu, (const char*)res, (const char*)verLine }) widest = std::max(widest, textW(sm, t));
+    const float width = look::counterWidth(s, numbersW, widest);
+    ImGui::SetNextWindowPos({ right ? vp->Size.x - m : m, bottom ? vp->Size.y - m : m }, ImGuiCond_Always, { right ? 1.f : 0.f, bottom ? 1.f : 0.f });
+    ImGui::SetNextWindowSize({ width, 0 }, ImGuiCond_Always);  // 0: the height fits the content
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, { 18 * s, 12 * s });
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.f);
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, { 8 * s, 6 * s });
+    ImGui::Begin("##fps", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoBackground |
+                                   ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav);
+    ImGuiWindow* win = ImGui::GetCurrentWindow();
+    ImDrawList* dl = win->DrawList;
+    const ImVec2 wa = win->Pos, wb(win->Pos.x + win->Size.x, win->Pos.y + win->Size.y);
+    ImGui::PushClipRect(ImVec2(wa.x, wa.y - 6 * s), wb, false);  // the streak's glow reaches above the box
+    look::panel(dl, wa, wb, look::kCounter);
+    ImGui::PopClipRect();
+    const ImVec2 p = ImGui::GetCursorScreenPos();
+    const float cw = ImGui::GetContentRegionAvail().x;
+    // the numbers, right-aligned in their slots, each unit in spaced capitals on its number's baseline
+    auto bigNumber = [&](ImFont* f, float x, float slot, float v, const char* unitText) {
+        char num[16];
+        snprintf(num, sizeof num, "%.0f", v);
+        dl->AddText(f, f->FontSize, ImVec2(x + slot - textW(f, num), p.y), look::col(look::kInk), num);
+        const float uy = p.y + f->Ascent - sm->Ascent * unit / sm->FontSize;
+        look::spacedText(dl, sm, unit, ImVec2(x + slot + 7 * s, uy), unitText, 0.18f, look::kInk2);
+    };
+    const float baseX = p.x + slotFps + 7 * s + unitFps + 22 * s;
+    bigNumber(g_big, p.x, slotFps, g_fpsShown, "FPS");
+    if (gen) bigNumber(g_bigThin, baseX, slotBase, g_fpsRendered, "BASE");  // with FG off both numbers are the same
+    // the frame time under each number: the shown frames', and the game's own while frame generation runs
+    const float my = p.y + g_big->FontSize + 3 * s;
+    char ms[24];
+    look::msText(ms, sizeof ms, g_fpsShown);
+    dl->AddText(sm, sm->FontSize, ImVec2(p.x, my), look::col(look::kInk2), ms);
+    if (gen) { look::msText(ms, sizeof ms, g_fpsRendered); dl->AddText(sm, sm->FontSize, ImVec2(baseX, my), look::col(look::kInk2), ms); }
+    // the graph, then a fading rule above the lines
+    const float gy = my + sm->FontSize + 8 * s, gh = 34 * s, ry = gy + gh + 4 * s + 8 * s;
+    drawGraph(dl, ImVec2(p.x, gy), ImVec2(p.x + cw, gy + gh));
+    look::fadeRule(dl, p.x, p.x + cw, ry, look::rgba(205, 215, 228, .28f), s);
+    ImGui::Dummy(ImVec2(cw, ry + s + 6 * s - p.y - 6 * s));
+    ImGui::PushFont(sm);
+    if (gen) ImGui::TextColored(kAccents[backendVendor(fg.backend)].hi, "%s", fgLine);  // the generating vendor's colour
+    else ImGui::TextColored(look::kInfo, "%s", fgLine);
+    if (*g_gpu) ImGui::TextColored(look::kInfo, "%s", g_gpu);
+    if (*res) ImGui::TextColored(look::kInfo, "%s", res);
+    if (*verLine) ImGui::TextColored(look::kInfo, "%s", verLine);
+    ImGui::PopFont();
+    ImGui::PushClipRect(wa, wb, false);
+    look::brackets(dl, wa, wb, look::kCounter);
+    ImGui::PopClipRect();
     ImGui::End();
-    ImGui::PopStyleVar(2);
+    ImGui::PopStyleVar(3);
 }
 
 // Settings both layouts change, so a change in one shows in the other: the game's scaling mode (GraphicsConfig.ini, read
@@ -666,49 +751,101 @@ FgPick& fgPick() {
     return p;
 }
 
+// The desktop menu's look, pushed around drawMenu only: applyStyle, which the Steam Deck layout uses, stays as it is.
+// ImGui's own frames, ticks, grabs, arrows and nav outline go transparent; menu_look.h draws the look around them.
+struct DesktopLook {
+    static constexpr int kVars = 11, kColours = 18;
+    DesktopLook() {
+        const float s = g_scale;
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(30 * s, 24 * s));
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(10 * s, 6 * s));
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(10 * s, 8 * s));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.f);
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 0.f);
+        ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, 0.f);
+        ImGui::PushStyleVar(ImGuiStyleVar_GrabRounding, 0.f);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.f);
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 0.f);
+        ImGui::PushStyleVar(ImGuiStyleVar_PopupBorderSize, s);
+        ImGui::PushStyleVar(ImGuiStyleVar_ScrollbarRounding, 0.f);
+        const ImGuiCol clear[] = { ImGuiCol_FrameBg, ImGuiCol_FrameBgHovered, ImGuiCol_FrameBgActive, ImGuiCol_CheckMark, ImGuiCol_SliderGrab,
+                                   ImGuiCol_SliderGrabActive, ImGuiCol_Button, ImGuiCol_ButtonHovered, ImGuiCol_ButtonActive, ImGuiCol_NavCursor };
+        for (ImGuiCol c : clear) ImGui::PushStyleColor(c, look::kClear);
+        ImGui::PushStyleColor(ImGuiCol_Text, look::kInk);
+        ImGui::PushStyleColor(ImGuiCol_PopupBg, look::rgba(4, 6, 9, .94f));
+        ImGui::PushStyleColor(ImGuiCol_Border, look::kRule);
+        ImGui::PushStyleColor(ImGuiCol_Header, look::kSel);
+        ImGui::PushStyleColor(ImGuiCol_HeaderHovered, look::kSel);
+        ImGui::PushStyleColor(ImGuiCol_HeaderActive, look::kSel);
+        ImGui::PushStyleColor(ImGuiCol_TextDisabled, look::kDim);
+        ImGui::PushStyleColor(ImGuiCol_ScrollbarBg, look::rgba(4, 6, 9, .74f));  // the gutter the panel's fill leaves out
+    }
+    ~DesktopLook() { ImGui::PopStyleColor(kColours); ImGui::PopStyleVar(kVars); }
+    DesktopLook(const DesktopLook&) = delete;
+    DesktopLook& operator=(const DesktopLook&) = delete;
+};
+
 void drawMenu() {
     const ImGuiViewport* vp = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos({ vp->Size.x * 0.5f, vp->Size.y * 0.5f }, ImGuiCond_Appearing, { 0.5f, 0.5f });
-    ImGui::SetNextWindowSize({ 560 * g_scale, 0 }, ImGuiCond_Always);
-    ImGui::Begin("Lumenveil", nullptr, ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoResize);
+    const float s = g_scale;
+    look::ctx().s = s; look::ctx().fontSmall = g_small;
+    ImGui::SetNextWindowSize({ 600 * s, 0 }, ImGuiCond_Always);
+    DesktopLook styled;  // popped after End
+    ImGui::Begin("Lumenveil", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoCollapse |
+                                       ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoResize);
+    ImGuiWindow* win = ImGui::GetCurrentWindow();
+    const ImVec2 wa = win->Pos, wb(win->Pos.x + win->Size.x, win->Pos.y + win->Size.y);
+    ImGui::PushClipRect(ImVec2(wa.x, wa.y - 6 * s), wb, false);  // the streak's glow reaches above the panel
+    look::panel(win->DrawList, wa, wb, look::kMenu, look::panelEnd(win));  // the scrollbar, drawn by Begin, stays on top
+    ImGui::PopClipRect();
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10 * s, 8 * s));  // the lists' padding; the menu's is set
     if (g_padOpened) { pad::focusFirst(); g_padOpened = false; }
     ImGui::PushTextWrapPos(0.0f);  // notes wrap at the window edge instead of being clipped
-    const float labelW = 200 * g_scale;
-    auto label = [&](const char* t) { ImGui::AlignTextToFramePadding(); ImGui::TextUnformatted(t); ImGui::SameLine(labelW); ImGui::SetNextItemWidth(-FLT_MIN); };
+    const float labelW = 30 * s + 212 * s;  // the widgets' column, from the window's edge
+    // a setting's row: the selected row's look, the name indented past the cursor diamond, the widget to the right edge
+    auto label = [&](const char* t) {
+        look::row();
+        ImGui::AlignTextToFramePadding();
+        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 22 * s);
+        ImGui::TextUnformatted(t);
+        ImGui::SameLine(labelW);
+        look::ctx().widgetX = ImGui::GetCursorScreenPos().x;
+        ImGui::SetNextItemWidth(-FLT_MIN);
+    };
     auto missing = [](const wchar_t* f) { return GetFileAttributesW(path(f).c_str()) == INVALID_FILE_ATTRIBUTES; };
     const bool nvidiaGpu = g_vendorId == 0x10DE, intelGpu = g_vendorId == 0x8086;
 
-    if (g_logo || g_logo11) {  // centred, 64% of the content width
-        const float avail = ImGui::GetContentRegionAvail().x, w = avail * 0.64f;
+    if (g_logo || g_logo11) {  // centred, 58% of the content width
+        const float avail = ImGui::GetContentRegionAvail().x, w = avail * 0.58f;
         ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (avail - w) * 0.5f);
         ImGui::Image(g_native ? (ImTextureID)(uintptr_t)g_logo11 : (ImTextureID)gpuAt(g_srvHeap, 2).ptr, { w, w * g_logoH / g_logoW });
     }
 
     // ---- Upscaling: its controls take the colour of the upscaler running, else of the one the setting asks for
-    ImGui::SeparatorText("Upscaling");
+    look::SeparatorText("Upscaling");
     const DlssInfo di = dlssInfo();
     const bool activeKnown = di.active >= 0 && di.active < kUpscalerCount;
     // the upscaler wanted: the one chosen, else what Auto runs, else what Auto picks on this GPU
     const int want = di.upscaler >= 0 && di.upscaler < kUpscalerCount ? di.upscaler : activeKnown ? di.active
                    : nvidiaGpu ? 0 : intelGpu && !missing(kUpscalers[2].file) ? 2 : 1;
     {
-        const Vendor v = kUpscalers[activeKnown ? di.active : want].vendor;
-        AccentScope accent(v);
         const char* names[1 + kUpscalerCount] = { "Auto  (DLSS on NVIDIA, XeSS on Intel, else FSR)" };
         for (int i = 0; i < kUpscalerCount; ++i) names[1 + i] = kUpscalers[i].name;
         int us = di.upscaler >= -1 && di.upscaler < kUpscalerCount ? di.upscaler + 1 : 0;
         label("Upscaler");
-        if (ImGui::Combo("##upscaler", &us, names, 1 + kUpscalerCount)) { dlssSetUpscaler(us - 1); iniSet(L"dlss", L"upscaler", us - 1); }
-        if (want == 0 && !nvidiaGpu) ImGui::TextColored(kAmber, "DLSS needs an NVIDIA GeForce RTX card. The game uses its own anti-aliasing.");
-        else if (missing(kUpscalers[want].file)) ImGui::TextColored(kAmber, "%s", kUpscalers[want].missing);
+        if (look::option("##upscaler", &us, names, 1 + kUpscalerCount)) { dlssSetUpscaler(us - 1); iniSet(L"dlss", L"upscaler", us - 1); }
+        if (want == 0 && !nvidiaGpu) note(kAmber, "DLSS needs an NVIDIA GeForce RTX card. The game uses its own anti-aliasing.");
+        else if (missing(kUpscalers[want].file)) note(kAmber, "%s", kUpscalers[want].missing);
         if (di.active == 1 && *di.fsrVersion)
-            ImGui::TextDisabled(di.fsrVersion[0] >= '4' ? "AMD FSR %s (machine learning)." : "AMD FSR %s.", di.fsrVersion);
-        if (di.active == 2 && *di.xessVersion) ImGui::TextDisabled("Intel XeSS %s.", di.xessVersion);
-        if (kUpscalers[want].tested) testedNote(kUpscalers[want].tested, kUpscalers[want].vendor);
+            note(look::kDim, di.fsrVersion[0] >= '4' ? "AMD FSR %s (machine learning)." : "AMD FSR %s.", di.fsrVersion);
+        if (di.active == 2 && *di.xessVersion) note(look::kDim, "Intel XeSS %s.", di.xessVersion);
+        if (kUpscalers[want].tested) testedNote(kUpscalers[want].tested);
         bool on = dlssEnabled();
         label("Enabled");
         bool flip = ImGui::Checkbox("##upscale", &on);
         flip |= pad::padTick(on);
+        look::toggleLook(on);
         if (flip) dlssToggle();
     }
 
@@ -734,7 +871,9 @@ void drawMenu() {
     }
     label("Scaling mode");
     ImGui::BeginDisabled(!ratio);
-    if (ImGui::BeginCombo("##scale", preview)) {
+    bool scaleOpen = false;
+    const int scaleStep = look::optionFrame("##scale", preview, &scaleOpen);
+    if (scaleOpen) {
         for (int i = 0; i < modeCount; ++i) {
             const Mode& m = scaleModes[i];
             char t[96]; modeText(t, sizeof t, m.name, m.pct);
@@ -745,21 +884,26 @@ void drawMenu() {
         }
         ImGui::EndCombo();
     }
+    if (scaleStep) {  // ‹ or ›: the next mode in the list, written as a pick from the list is
+        int cur = -1;
+        for (int i = 0; i < modeCount; ++i) if (scaleModes[i].pct == ratio) cur = i;
+        ratio = scaleModes[cur < 0 ? (scaleStep > 0 ? 0 : modeCount - 1) : look::stepWrap(cur, scaleStep, modeCount)].pct;
+        WritePrivateProfileStringW(L"BasicSettings", L"RenderingResolutionRatio", std::to_wstring(ratio).c_str(), cfg.c_str());
+    }
     ImGui::EndDisabled();
     const int live = di.outW ? int(std::lround(100.0 * di.inH / di.outH)) : 0;
-    if (live) ImGui::TextDisabled("Now rendering %u\xC3\x97%u \xE2\x86\x92 %u\xC3\x97%u (%d%%).", di.inW, di.inH, di.outW, di.outH, live);
-    if (ratio && live && std::abs(live - ratio) > 1) ImGui::TextColored(kGreen, "Restart the game to apply the new scaling mode.");
-    else if (ratio && !live) ImGui::TextDisabled("Changes apply the next time the game starts.");
+    if (live) note(look::kDim, "Now rendering %u\xC3\x97%u \xE2\x86\x92 %u\xC3\x97%u (%d%%).", di.inW, di.inH, di.outW, di.outH, live);
+    if (ratio && live && std::abs(live - ratio) > 1) note(look::kGo, "Restart the game to apply the new scaling mode.");
+    else if (ratio && !live) note(look::kDim, "Changes apply the next time the game starts.");
     if (want == 2 && ((ratio && ratio < xessLowestPct()) || xessInputBelowRange())) {
         if (ultraPerformancePct(true))
-            ImGui::TextColored(kAmber, "Intel XeSS needs a scaling mode of %d%% or more. Pick Ultra Performance again (%d%% with XeSS) "
+            note(kAmber, "Intel XeSS needs a scaling mode of %d%% or more. Pick Ultra Performance again (%d%% with XeSS) "
                                        "and restart the game.", xessLowestPct(), xessLowestPct());
         else
-            ImGui::TextColored(kAmber, "Intel XeSS needs a scaling mode of %d%% or more. Pick Performance and restart the game.", xessLowestPct());
+            note(kAmber, "Intel XeSS needs a scaling mode of %d%% or more. Pick Performance and restart the game.", xessLowestPct());
     }
 
     if (want == 0 && (di.active == 0 || !activeKnown)) {  // DLSS's model; FSR picks its own
-        AccentScope accent(kNvidia);
         static const int presets[] = { 0, 11, 13, 12, 10, 6, 5 };
         static const char* presetNames[] = { "Default  (NVIDIA picks per mode)", "K  \xC2\xB7  transformer, best quality",
                                              "M  \xC2\xB7  transformer, made for Performance", "L  \xC2\xB7  transformer, made for Ultra Performance",
@@ -771,16 +915,17 @@ void drawMenu() {
         for (; models < IM_ARRAYSIZE(presets); ++models) { modelNames[models] = presetNames[models]; if (presets[models] == di.preset) pi = models; }
         if (pi < 0) { snprintf(custom, sizeof custom, "%c  \xC2\xB7  set in ffxv_dlss.ini", 'A' + di.preset - 1); modelNames[models] = custom; pi = models++; }
         label("DLSS model");
-        if (ImGui::Combo("##preset", &pi, modelNames, models) && pi < IM_ARRAYSIZE(presets)) { iniSet(L"dlss", L"preset", presets[pi]); dlssSetPreset(presets[pi]); }
+        if (look::option("##preset", &pi, modelNames, models) && pi < IM_ARRAYSIZE(presets)) { iniSet(L"dlss", L"preset", presets[pi]); dlssSetPreset(presets[pi]); }
         if (*di.version && atoi(di.version) < 310)
-            ImGui::TextColored(kAmber, "DLSS %s is older than 310: models J, K, L and M need 310 or newer, so NVIDIA's default is used.", di.version);
+            note(kAmber, "DLSS %s is older than 310: models J, K, L and M need 310 or newer, so NVIDIA's default is used.", di.version);
     }
     // the two sharpening rows: a slider and a box the value can be typed into, the same width in both rows
-    const float boxW = 64 * g_scale;
+    const float boxW = 76 * s;
     bool typing = false;
     int sharp = di.sharpness;
     label("Sharpening");
     const bool sharpChanged = pad::typedSlider("##sharp", sharp, 0, 100, 1, sharp ? "%d%%" : "Off", boxW, &typing);
+    look::sliderLook(sharp, 0, 100);
     if (sharpChanged) { dlssSetSharpness(sharp); iniSet(L"dlss", L"sharpness", sharp); }
     int gameSharp = gameSharpenGet();
     label("Game sharpening");
@@ -789,10 +934,10 @@ void drawMenu() {
         gameSharpenSet(gameSharp);
         iniSet(L"dlss", L"game_sharpening", gameSharp);
     }
-    g_typing = typing;
+    look::sliderLook(gameSharp, 0, 200);
 
     // ---- Frame Generation: its controls take the colour of the backend picked, the readouts that of the one running
-    ImGui::SeparatorText("Frame Generation");
+    look::SeparatorText("Frame Generation");
     const FgStatus st = fgStatus();
     FgSettings fs = fgSettings();
     bool changed = false;
@@ -813,46 +958,46 @@ void drawMenu() {
     const bool fsrOffAtLaunch = !st.available && !launchEnable && !st.formatRefused
                                 && ((running == 1 && fsrFiles && fsrFgDll) || (running == 2 && xessFgFiles));
     {
-        AccentScope accent(kBackends[picked].vendor);
         const char* names[1 + kBackendCount] = { "Auto  (DLSS on NVIDIA, XeSS on Intel, else FSR)" };
         for (int i = 0; i < kBackendCount; ++i) names[1 + i] = kBackends[i].name;
         label("Backend");
-        if (ImGui::Combo("##fgbackend", &backend, names, 1 + kBackendCount)) iniSet(L"fg", L"backend", backend - 1);
+        if (look::option("##fgbackend", &backend, names, 1 + kBackendCount)) iniSet(L"fg", L"backend", backend - 1);
         if ((backend - 1 != launchBackend && picked != running) || (fsrOffAtLaunch && fs.enable))
-            ImGui::TextColored(kGreen, "Restart the game to switch frame generation.");
+            note(look::kGo, "Restart the game to switch frame generation.");
         if (!st.available) {
             if (running == 0 && dlssg)
-                ImGui::TextDisabled("Not available: DLSS Frame Generation needs an RTX 40 or 50 series card. AMD FSR Frame Generation runs on this card.");
+                note(look::kDim, "Not available: DLSS Frame Generation needs an RTX 40 or 50 series card. AMD FSR Frame Generation runs on this card.");
             else if (running == 0)
-                ImGui::TextColored(kAmber, "nvngx_dlssg.dll not found. Copy it from the same DLSS SDK folder (lib\\Windows_x86_64\\rel) "
+                note(kAmber, "nvngx_dlssg.dll not found. Copy it from the same DLSS SDK folder (lib\\Windows_x86_64\\rel) "
                                            "into ffxv_dlss\\streamline and restart the game.");
             else if (running == 2) {
                 if (!xessFgFiles)  // named here: the Upscaling section names Intel's files only while XeSS upscales
-                    ImGui::TextColored(kAmber, "Intel's XeSS frame generation needs libxess.dll, libxess_fg.dll and libxell.dll in "
+                    note(kAmber, "Intel's XeSS frame generation needs libxess.dll, libxess_fg.dll and libxell.dll in "
                                                "ffxv_dlss\\xess. Put the XeSS SDK 3.0.2 zip in your Downloads folder and run the "
                                                "installer again, or copy them from its bin folder. INSTALL.txt has the download link.");
                 else if (st.formatRefused)
-                    ImGui::TextDisabled("Not available: Intel XeSS frame generation does not take the game's HDR output format. "
+                    note(look::kDim, "Not available: Intel XeSS frame generation does not take the game's HDR output format. "
                                         "Turn HDR off in the game, or pick another backend.");
-                else if (launchEnable) ImGui::TextDisabled("Not available: Intel XeSS frame generation did not start. ffxv_dlss.log has the reason.");
+                else if (launchEnable) note(look::kDim, "Not available: Intel XeSS frame generation did not start. ffxv_dlss.log has the reason.");
             }
-            else if (!fsrFiles) ImGui::TextColored(kAmber, "AMD's FSR files not found (see Upscaling above).");
+            else if (!fsrFiles) note(kAmber, "AMD's FSR files not found (see Upscaling above).");
             else if (!fsrFgDll)
-                ImGui::TextColored(kAmber, "amd_fidelityfx_framegeneration_dx12.dll not found in ffxv_dlss\\fidelityfx. FSR upscaling works without it.");
-            else if (launchEnable) ImGui::TextDisabled("Not available: AMD FSR frame generation did not start. ffxv_dlss.log has the reason.");
+                note(kAmber, "amd_fidelityfx_framegeneration_dx12.dll not found in ffxv_dlss\\fidelityfx. FSR upscaling works without it.");
+            else if (launchEnable) note(look::kDim, "Not available: AMD FSR frame generation did not start. ffxv_dlss.log has the reason.");
         }
-        if (st.available && st.backend == 0 && *dlssgVersion()) ImGui::TextDisabled("NVIDIA DLSS frame generation %s.", dlssgVersion());
-        if (st.available && st.backend == 1 && *fsrFgVersion()) ImGui::TextDisabled("AMD FSR frame generation %s.", fsrFgVersion());
+        if (st.available && st.backend == 0 && *dlssgVersion()) note(look::kDim, "NVIDIA DLSS frame generation %s.", dlssgVersion());
+        if (st.available && st.backend == 1 && *fsrFgVersion()) note(look::kDim, "AMD FSR frame generation %s.", fsrFgVersion());
         if (st.available && st.backend == 2 && *xessFgVersion())
-            ImGui::TextDisabled("Intel XeSS frame generation %s, with Xe Low Latency.", xessFgVersion());
+            note(look::kDim, "Intel XeSS frame generation %s, with Xe Low Latency.", xessFgVersion());
         // the tested-only note while the backend is picked, and while it still runs until the restart
         const int noteB = kBackends[picked].tested ? picked : st.backend >= 0 && st.backend < kBackendCount && kBackends[st.backend].tested ? st.backend : -1;
-        if (noteB >= 0) testedNote(kBackends[noteB].tested, kBackends[noteB].vendor);
+        if (noteB >= 0) testedNote(kBackends[noteB].tested);
         ImGui::BeginDisabled(!st.available && !fsrOffAtLaunch);
         bool on = fs.enable != 0;
         label("Enabled");
         bool fgFlip = ImGui::Checkbox("##fg", &on);
         fgFlip |= pad::padTick(on);
+        look::toggleLook(on);
         if (fgFlip) { fs.enable = on; changed = true; }
         if (st.backend == 0) {  // DLSS-G modes: Dynamic (when supported), then 2x .. (max generated + 1)x; FSR and XeSS 2x
             const char* modes[7]; char modeNames[6][8]; int n = 0, cur = 0;
@@ -863,49 +1008,49 @@ void drawMenu() {
                 modes[n++] = modeNames[k];
             }
             label("Mode");
-            if (ImGui::Combo("##mode", &cur, modes, n)) { fs.frames = st.dynamicSupported ? cur : cur + 1; changed = true; }
+            if (look::option("##mode", &cur, modes, n)) { fs.frames = st.dynamicSupported ? cur : cur + 1; changed = true; }
             if (fs.frames == 0) {
                 label("Target fps");
-                changed |= pad::padSlider("##target", fs.target, 60, 480, 5, "%d fps");
+                changed |= pad::typedSlider("##target", fs.target, 60, 480, 5, "%d fps", boxW, &typing);
+                look::sliderLook(fs.target, 60, 480);
             }
         }
         if (st.generating && g_fpsRendered > 0)
-            ImGui::TextColored(kAccents[backendVendor(st.backend)].hi, "Generating %.1f\xC3\x97 \xC2\xB7 %.0f shown from %.0f rendered",
+            note(kAccents[backendVendor(st.backend)].hi, "Generating %.1f\xC3\x97 \xC2\xB7 %.0f shown from %.0f rendered",
                                g_fpsShown / g_fpsRendered, g_fpsShown, g_fpsRendered);
-        else ImGui::TextDisabled(st.available ? "Idle: turns on in gameplay, where the upscaler runs." : "");
+        else note(look::kDim, st.available ? "Idle: turns on in gameplay, where the upscaler runs." : "");
 
         if (st.backend == 0) {  // Reflex comes with Streamline: DLSS-G only
-            ImGui::SeparatorText("NVIDIA Reflex");
+            look::SeparatorText("NVIDIA Reflex");
             static const char* reflexModes[] = { "Off", "On", "On + Boost" };
             label("Low latency");
-            changed |= ImGui::Combo("##reflex", &fs.reflex, reflexModes, 3);
-            if (fs.enable && fs.reflex == 0) ImGui::TextDisabled("Frame generation needs Reflex, so it stays on while FG is enabled.");
-            else if (fs.reflex == 2) ImGui::TextDisabled("Boost keeps GPU clocks up when the CPU is the limit. Slightly more power.");
+            changed |= look::option("##reflex", &fs.reflex, reflexModes, 3);
+            if (fs.enable && fs.reflex == 0) note(look::kDim, "Frame generation needs Reflex, so it stays on while FG is enabled.");
+            else if (fs.reflex == 2) note(look::kDim, "Boost keeps GPU clocks up when the CPU is the limit. Slightly more power.");
         } else if (st.backend == 2) {  // Xe Low Latency comes with XeSS frame generation
-            ImGui::SeparatorText("Intel Xe Low Latency");
+            look::SeparatorText("Intel Xe Low Latency");
             static const char* xellModes[] = { "Off", "On" };
             int xell = fs.reflex > 0 ? 1 : 0;  // the ini's On + Boost (2) shows as On and is kept until changed here
             label("Low latency");
-            if (ImGui::Combo("##xell", &xell, xellModes, 2) && xell != (fs.reflex > 0 ? 1 : 0)) { fs.reflex = xell; changed = true; }
-            ImGui::TextDisabled("XeSS frame generation needs Xe Low Latency, so it stays on while frame generation is enabled.");
+            if (look::option("##xell", &xell, xellModes, 2) && xell != (fs.reflex > 0 ? 1 : 0)) { fs.reflex = xell; changed = true; }
+            note(look::kDim, "XeSS frame generation needs Xe Low Latency, so it stays on while frame generation is enabled.");
         } else if ((st.backend == 1 || di.active == 1) && !al2MenuShown(st.antilag, st.backend)) {  // the presenter paces frames itself whenever FSR or XeSS is in use
-            ImGui::SeparatorText("Latency");
-            ImGui::TextDisabled("The game waits for the GPU each frame instead of queueing frames ahead (FSR has no Reflex).");
+            look::SeparatorText("Latency");
+            note(look::kDim, "The game waits for the GPU each frame instead of queueing frames ahead (FSR has no Reflex).");
         } else if (di.active == 2 && !al2MenuShown(st.antilag, st.backend)) {
-            ImGui::SeparatorText("Latency");
-            ImGui::TextDisabled("The game waits for the GPU each frame instead of queueing frames ahead.");
+            look::SeparatorText("Latency");
+            note(look::kDim, "The game waits for the GPU each frame instead of queueing frames ahead.");
         }
     }
     ImGui::EndDisabled();
     if (al2MenuShown(st.antilag, st.backend)) {  // AMD Radeon Anti-Lag 2: outside the block above, so it works without FG
-        AccentScope accent(kAmd);
-        ImGui::SeparatorText("AMD Radeon Anti-Lag 2");
+        look::SeparatorText("AMD Radeon Anti-Lag 2");
         const bool ready = st.antilag == kAl2Ready;
         ImGui::BeginDisabled(!ready);
         static const char* al2Modes[] = { "Off", "On" };
         int al2 = ready && fs.antilag ? 1 : 0;  // Off while unavailable; the stored setting is kept
         label("Low latency");
-        if (ImGui::Combo("##antilag", &al2, al2Modes, 2) && ready && al2 != (fs.antilag ? 1 : 0)) { fs.antilag = al2; changed = true; }
+        if (look::option("##antilag", &al2, al2Modes, 2) && ready && al2 != (fs.antilag ? 1 : 0)) { fs.antilag = al2; changed = true; }
         ImGui::EndDisabled();
         // the presenter paces frames itself whenever FSR or XeSS is in use; then Anti-Lag 2 comes on top of that
         const bool paces = st.backend == 1 || di.active == 1 || di.active == 2;
@@ -917,20 +1062,21 @@ void drawMenu() {
         static const char* const kOn = "On: AMD's driver also holds back the game's next frame until just before the GPU needs it, for lower input lag.";
         static const char* const kOnNative = "On: AMD's driver holds back the game's next frame until just before the GPU needs it, for lower input lag.";
         // the note keeps the height of the longest one, so the menu does not change size between states
-        const float wrapW = ImGui::GetContentRegionAvail().x, gap = ImGui::GetStyle().ItemSpacing.y;
+        const float wrapW = ImGui::GetContentRegionAvail().x - 22 * s, gap = ImGui::GetStyle().ItemSpacing.y;
         float slotH = 0;
-        for (const char* s : { kNoDriver, kLinux, kOff, kOffNative, kOn, kOnNative })
-            slotH = std::max(slotH, ImGui::CalcTextSize(s, nullptr, false, wrapW).y);
+        ImGui::PushFont(g_small);
+        for (const char* t : { kNoDriver, kLinux, kOff, kOffNative, kOn, kOnNative })
+            slotH = std::max(slotH, ImGui::CalcTextSize(t, nullptr, false, wrapW).y);
+        ImGui::PopFont();
         const float y0 = ImGui::GetCursorPosY();
-        if (st.antilag == kAl2Wine) ImGui::TextDisabled("%s", kLinux);
-        else if (!ready) ImGui::TextColored(kAmber, "%s", kNoDriver);
-        else if (al2) ImGui::TextDisabled("%s", paces ? kOn : kOnNative);
-        else ImGui::TextDisabled("%s", paces ? kOff : kOffNative);
+        if (st.antilag == kAl2Wine) note(look::kDim, "%s", kLinux);
+        else if (!ready) note(kAmber, "%s", kNoDriver);
+        else if (al2) note(look::kDim, "%s", paces ? kOn : kOnNative);
+        else note(look::kDim, "%s", paces ? kOff : kOffNative);
         if (ImGui::GetCursorPosY() < y0 + slotH + gap) { ImGui::SetCursorPosY(y0 + slotH); ImGui::Dummy(ImVec2(0, 0)); }
-        testedNote("Untested on Radeon cards so far. If the game stutters or crashes with it on, turn it off and send ffxv_dlss.log.", kAmd);
+        testedNote("Untested on Radeon cards so far. If the game stutters or crashes with it on, turn it off and send ffxv_dlss.log.");
     }
     {
-        AccentScope accent(kNeutral);  // the mod's own frame cap, whichever backend runs
         // it applies through Reflex when Streamline runs, else through the presenter's own pacing (FSR or XeSS, or the
         // game's VSync on Windows), so it stays usable without FG
         ImGui::BeginDisabled(!st.available && st.backend < 0 && di.active != 1 && di.active != 2 && !st.vsyncPaced);
@@ -938,53 +1084,85 @@ void drawMenu() {
         const char* capModes[] = { "Off", autoName, "Custom" };
         int capMode = fs.limit < 0 ? 1 : fs.limit == 0 ? 0 : 2;
         label("Frame cap");
-        if (ImGui::Combo("##capmode", &capMode, capModes, 3)) { fs.limit = capMode == 0 ? 0 : capMode == 1 ? -1 : std::max(st.autoCap, 60); changed = true; }
+        if (look::option("##capmode", &capMode, capModes, 3)) { fs.limit = capMode == 0 ? 0 : capMode == 1 ? -1 : std::max(st.autoCap, 60); changed = true; }
         if (capMode == 2) {
             label("Cap");
-            changed |= pad::padSlider("##limit", fs.limit, 30, 480, 5, "%d fps");
+            changed |= pad::typedSlider("##limit", fs.limit, 30, 480, 5, "%d fps", boxW, &typing);
+            look::sliderLook(fs.limit, 30, 480);
         }
         else if (capMode == 1)
-            ImGui::TextDisabled("Output capped at %d fps, just under the display's refresh, so %s stays engaged. "
+            note(look::kDim, "Output capped at %d fps, just under the display's refresh, so %s stays engaged. "
                                 "Pair it with V-Sync on in the driver's control panel.", st.autoCap, syncName());
         ImGui::EndDisabled();
     }
+    g_typing = typing;  // after the last box
     if (changed) {
         fgApply(fs);
         iniSet(L"fg", L"enable", fs.enable); iniSet(L"fg", L"frames", fs.frames); iniSet(L"fg", L"target", fs.target); iniSet(L"fg", L"limit", fs.limit);
         iniSet(L"fg", L"reflex", fs.reflex); iniSet(L"fg", L"antilag", fs.antilag);
     }
 
-    ImGui::SeparatorText("HUD");
+    look::SeparatorText("HUD");
     label("Sharper HUD");
     bool hudSharp = uiSharp();
     bool sharpFlip = ImGui::Checkbox("##sharp", &hudSharp);
     sharpFlip |= pad::padTick(hudSharp);
+    look::toggleLook(hudSharp);
     if (sharpFlip) { uiSetSharp(hudSharp); iniSet(L"ui", L"sharp", hudSharp); }
-    ImGui::TextDisabled("Crisper HUD text, icons and title screen. Costs a little frame rate at 4K.");
+    note(look::kDim, "Crisper HUD text, icons and title screen. Costs a little frame rate at 4K.");
 
-    ImGui::SeparatorText("Overlay");
+    look::SeparatorText("Overlay");
     label("FPS counter");
     bool counterFlip = ImGui::Checkbox("##counter", &g_counter);
     counterFlip |= pad::padTick(g_counter);
+    look::toggleLook(g_counter);
     if (counterFlip) iniSet(L"overlay", L"enable", g_counter);
     static const char* corners[] = { "Top left", "Top right", "Bottom left", "Bottom right" };
     label("Position");
-    if (ImGui::Combo("##corner", &g_corner, corners, 4)) iniSet(L"overlay", L"corner", g_corner);
+    if (look::option("##corner", &g_corner, corners, 4)) iniSet(L"overlay", L"corner", g_corner);
     {  // every machine: a handheld the mod does not recognise picks the Steam Deck layout here
         static const char* layouts[] = { "Automatic", "Steam Deck", "Desktop" };
         label("Layout");
-        if (ImGui::Combo("##layout", &g_layout, layouts, 3)) iniSet(L"overlay", L"layout", g_layout);
+        if (look::option("##layout", &g_layout, layouts, 3)) iniSet(L"overlay", L"layout", g_layout);
     }
 
-    ImGui::Spacing();
+    // the footer: a faint line, the key hints, then the save line and the trademarks
+    ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 8 * s);
+    const ImVec2 foot = ImGui::GetCursorScreenPos();
+    win->DrawList->AddRectFilled(foot, ImVec2(foot.x + ImGui::GetContentRegionAvail().x, foot.y + s), look::col(look::rgba(205, 215, 228, .12f)));
+    ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 10 * s);
     const bool popup = ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup);
     g_padBusy = popup || ImGui::IsAnyItemActive();  // B backs out of the list or slider instead of closing the menu
     if (g_padUsed) pad::drawHints(popup, g_padBusy, g_scale);  // in the footer line's own height: nothing moves
-    else ImGui::TextDisabled("Insert or Esc to close \xC2\xB7 changes apply and save immediately");
-    ImGui::Spacing();
-    ImGui::TextDisabled("Uses NVIDIA DLSS, NVIDIA Reflex and NVIDIA Streamline, AMD FSR and Intel XeSS. NVIDIA, DLSS and "
-                        "Reflex are trademarks of NVIDIA Corporation, FSR of AMD and XeSS of Intel.");
+    else {  // the keyboard's keys, in the same height
+        const float h = ImGui::GetTextLineHeight();
+        const ImVec2 k = ImGui::GetCursorScreenPos();
+        ImGui::Dummy(ImVec2(ImGui::GetContentRegionAvail().x, h));
+        float x = look::keyHint(win->DrawList, k.x, k.y, h, "\xE2\x86\x91\xE2\x86\x93", "Select") + 18 * s;
+        x = look::keyHint(win->DrawList, x, k.y, h, "\xE2\x86\x90\xE2\x86\x92", "Change") + 18 * s;
+        look::keyHint(win->DrawList, x, k.y, h, "Ins", "Close");
+    }
+    ImGui::PushFont(g_small);
+    ImGui::PushStyleColor(ImGuiCol_Text, look::kDim);
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(10 * s, 4 * s));
+    ImGui::TextUnformatted("Changes apply and save immediately.");
+    {  // the release number at the right end of the same line, drawn over it: nothing moves
+        const char* ver = "Lumenveil " LUMENVEIL_VERSION;
+        const ImVec2 r = ImGui::GetItemRectMin();
+        const float right = win->Pos.x + win->Size.x - win->WindowPadding.x - (win->ScrollbarY ? win->ScrollbarSizes.x : 0);
+        win->DrawList->AddText(ImVec2(right - ImGui::CalcTextSize(ver).x, r.y), ImGui::GetColorU32(ImGuiCol_Text), ver);
+    }
+    ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 6 * s);  // a little air above the trademark lines
+    look::fineText("Uses NVIDIA DLSS, NVIDIA Reflex and NVIDIA Streamline, AMD FSR and Intel XeSS. NVIDIA, DLSS and "
+                   "Reflex are trademarks of NVIDIA Corporation, FSR of AMD and XeSS of Intel.", 11);  // smaller than the notes
+    ImGui::PopStyleVar();
+    ImGui::PopStyleColor();
+    ImGui::PopFont();
     ImGui::PopTextWrapPos();
+    ImGui::PopStyleVar();  // the lists' padding
+    ImGui::PushClipRect(wa, wb, false);
+    look::brackets(win->DrawList, wa, wb, look::kMenu);
+    ImGui::PopClipRect();
     ImGui::End();
 }
 
@@ -1512,6 +1690,9 @@ bool compose(IDXGISwapChain3* sc, UINT index, bool layer) {
     // the Steam Deck layout moves its own focus, so ImGui's must not move too; the desktop menu gets it back
     if (g_open && g_deckOpen) io.ConfigFlags &= ~ImGuiConfigFlags_NavEnableGamepad;
     else io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
+    // the desktop menu also moves and changes with the arrow keys (Space and Enter open a list); the Deck layout has its own keys
+    if (g_open && g_deckOpen) io.ConfigFlags &= ~ImGuiConfigFlags_NavEnableKeyboard;
+    else io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
     if (g_native) ImGui_ImplDX11_NewFrame();
     else ImGui_ImplDX12_NewFrame();
     ImGui::NewFrame();
@@ -1606,8 +1787,9 @@ void inputThreads(DWORD* dinput, DWORD* xinput, unsigned* diPolls) { *dinput = g
 void menuCount(unsigned shown) {
     ++g_rendered; g_shown += shown;
     LARGE_INTEGER now; QueryPerformanceCounter(&now);
+    g_frames.record(double(now.QuadPart) / (g_freq.QuadPart ? g_freq.QuadPart : 1), shown);
     const double dt = double(now.QuadPart - g_statStart.QuadPart) / (g_freq.QuadPart ? g_freq.QuadPart : 1);
-    if (dt < 0.5) return;
+    if (dt < 0.25) return;
     g_fpsRendered = float(g_rendered / dt); g_fpsShown = float(g_shown / dt);
     g_rendered = g_shown = 0; g_statStart = now;
 }

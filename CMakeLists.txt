@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(ffxv_dlss LANGUAGES C CXX ASM_MASM)
+project(ffxv_dlss VERSION 1.0.2 LANGUAGES C CXX ASM_MASM)  # the release number the menu shows
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded")  # static CRT: no extra DLLs in the game folder
@@ -11,7 +11,7 @@ target_include_directories(dxgi PRIVATE third_party/minhook/include src third_pa
                            third_party/fidelityfx/api/include third_party/fidelityfx/upscalers/include third_party/fidelityfx/framegeneration/include
                            third_party/xess/inc  # Intel XeSS headers (submodule); Intel's DLLs are loaded at run time, never linked
                            third_party/amd-antilag2)  # AMD Anti-Lag 2 header; AMD's driver provides the runtime
-target_compile_definitions(dxgi PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX _CRT_SECURE_NO_WARNINGS)
+target_compile_definitions(dxgi PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX _CRT_SECURE_NO_WARNINGS LUMENVEIL_VERSION="${PROJECT_VERSION}")
 target_link_libraries(dxgi PRIVATE dxguid d3d12)
 target_link_options(dxgi PRIVATE /PDBALTPATH:dxgi.pdb)  # the DLL records the bare .pdb name, not the build folder
 
