@@ -45,16 +45,17 @@ def problems(src, lk, ph):
     row = inline(lk, 'row')
     if None in (menu, comp, count, ctr, style, row): return ['drawMenu, compose, menuCount, drawCounter, applyStyle or look::row not found']
     m = code(menu)
-    # the panel: its fill leaves the scrollbar's gutter out (review finding 4)
-    if not re.search(r'look::panel\(win->DrawList, wa, wb, look::kMenu, look::panelEnd\(win\)\);', m): out.append('the menu panel covers the scrollbar')
+    # the panel: one fixed size that never scrolls, so no scrollbar for the panel to cover (review finding 4)
+    if not re.search(r'ImGuiWindowFlags_NoResize \| ImGuiWindowFlags_NoScrollbar \|', m) or not re.search(r'look::panel\(dl, wa, wb, look::kMenu\);', m):
+        out.append('the menu panel can scroll')
     # the release number in the footer, from CMakeLists.txt's project VERSION
-    if not re.search(r'const char\* ver = "Lumenveil " LUMENVEIL_VERSION;\n[^\n]*\n[^\n]*\n\s*win->DrawList->AddText\([^\n]*\bver\);', m): out.append('the menu does not show the release number')
+    if not re.search(r'const char\* ver = "Lumenveil " LUMENVEIL_VERSION;\n[^\n]*\n\s*dl->AddText\([^\n]*\bver\);', m): out.append('the menu does not show the release number')
     # the trademark lines, smaller than the notes
     if not re.search(r'look::fineText\("Uses NVIDIA DLSS[^;]*, 11\);', m): out.append('the trademark lines are not in the fine text')
     # sliders: every one with its box (AC6), and g_typing set once, after the last box
     if 'padSlider(' in m: out.append('a slider in the desktop menu has no typed box')
-    for sid in ('##sharp', '##gamesharp', '##target', '##limit'):
-        if not re.search(r'pad::typedSlider\("' + sid + r'", ', m): out.append(sid + ' is not a typed slider')
+    if not re.search(r'const SliderSpec sp = sliderSpec\(r\.id, st\);\n[^\n]*\n\s*if \(pad::typedSlider\("##v", val, sp\.lo, sp\.hi, sp\.step, sp\.fmt, boxW, &typing\)\)', m):
+        out.append('the slider rows are not typed sliders')
     last, t = m.rfind('pad::typedSlider('), m.find('g_typing = typing;')
     if t < 0 or t < last or m.count('g_typing = ') != 1: out.append('g_typing is not set after the last box')
     # tick boxes: each Checkbox has its look right after its pad tick, before the next row
@@ -66,7 +67,7 @@ def problems(src, lk, ph):
     if not boxes: out.append('no tick boxes found')
     # options: no stock combo left; the scaling mode steps through the ‹ › frame
     if 'ImGui::Combo(' in m: out.append('a stock combo is left in the desktop menu')
-    if not re.search(r'look::optionFrame\("##scale", ', m): out.append('the scaling mode is not drawn as an option')
+    if not re.search(r'if \(r\.id == pages::kScaling\) \{[^\n]*\n[^\n]*\n\s*const int d = look::optionFrame\("##v", ', m): out.append('the scaling mode is not drawn as an option')
     # the counter: frame times recorded per rendered frame, the width from fixed slots only
     if not re.search(r'g_frames\.record\(', code(count)): out.append('menuCount does not record frame times')
     cw = re.search(r'look::counterWidth\(([^;]*)\);', code(ctr))
@@ -89,14 +90,14 @@ if p:
 menu = body(source, 'drawMenu'); ctr = body(source, 'drawCounter'); style = body(source, 'applyStyle'); row = inline(look, 'row')
 cnt = body(source, 'menuCount')
 broken = {
-    'panel over the scrollbar': (source.replace('look::kMenu, look::panelEnd(win));', 'look::kMenu, wb.x);', 1), look, padh),
+    'panel scrolls': (source.replace('ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoScrollbar |', 'ImGuiWindowFlags_NoResize |', 1), look, padh),
     'no release number': (source.replace('"Lumenveil " LUMENVEIL_VERSION;', '"Lumenveil";', 1), look, padh),
     'trademarks at note size': (source.replace('look::fineText("Uses NVIDIA DLSS', 'ImGui::TextWrapped("Uses NVIDIA DLSS', 1), look, padh),
-    'bare slider': (source.replace('pad::typedSlider("##limit", fs.limit, 30, 480, 5, "%d fps", boxW, &typing)', 'pad::padSlider("##limit", fs.limit, 30, 480, 5, "%d fps")', 1), look, padh),
+    'bare slider': (source.replace('pad::typedSlider("##v", val, sp.lo, sp.hi, sp.step, sp.fmt, boxW, &typing)', 'pad::padSlider("##v", val, sp.lo, sp.hi, sp.step, sp.fmt)', 1), look, padh),
     'typing set early': (source.replace(menu, menu.replace('    g_typing = typing;\n', '', 1).replace('    bool typing = false;\n', '    bool typing = false;\n    g_typing = typing;\n', 1), 1), look, padh),
     'tick without look': (source.replace(menu, re.sub(r'\n[^\n]*look::toggleLook\([^\n]*', '', menu, count=1), 1), look, padh),
-    'stock combo': (source.replace('look::option("##corner", &g_corner', 'ImGui::Combo("##corner", &g_corner', 1), look, padh),
-    'scale not an option': (source.replace('look::optionFrame("##scale", ', 'look::optionFrameX("##scale", ', 1), look, padh),
+    'stock combo': (source.replace('look::option("##v", &c, names, count, v.main, v.rest)', 'ImGui::Combo("##v", &c, names, count)', 1), look, padh),
+    'scale not an option': (source.replace('look::optionFrame("##v", ', 'look::optionFrameX("##v", ', 1), look, padh),
     'no record': (source.replace(cnt, cnt.replace('g_frames.record(', 'g_frames.size(', 1), 1), look, padh),
     'width from numbers': (source.replace(ctr, re.sub(r'look::counterWidth\(([^;]*)\);', r'look::counterWidth(\1 + g_fpsShown);', ctr, count=1), 1), look, padh),
     'keyboard nav in the Deck': (source.replace('io.ConfigFlags &= ~ImGuiConfigFlags_NavEnableKeyboard;', 'io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;', 1), look, padh),

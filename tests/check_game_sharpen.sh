@@ -15,10 +15,11 @@ g++ -std=c++17 -O1 -Wall -Wextra -Werror -I "$src" -o "$T/game_sharpen_test" "$h
     || { echo "FAIL: game_sharpen_test did not build"; exit 1; }
 "$T/game_sharpen_test" || { echo "FAIL: game_sharpen_test"; exit 1; }
 
-python3 -I - "$src/main.cpp" "$src/menu.cpp" "$src/menu_pad.h" "$src/dlss.cpp" <<'PY' || exit 1
+python3 -I - "$src/main.cpp" "$src/menu.cpp" "$src/menu_pad.h" "$src/dlss.cpp" "$src/menu_pages.h" <<'PY' || exit 1
 import re, sys
 read = lambda p: open(p, encoding='utf-8', errors='replace').read().replace('\r\n', '\n')
 main, menu, pad, dlss = (read(p) for p in sys.argv[1:5])
+menu += '\n' + read(sys.argv[5])  # the rows' order lives in the page model
 
 def body(src, name):
     m = re.search(r'^\S[^\n;]*?\b' + name + r'\([^\n]*\{\n(.*?)^\}', src, re.M | re.S)
@@ -61,12 +62,14 @@ def problems(main, menu, pad, dlss):
     # the setting: read at start, set and saved by the menu row
     if 'g_gameSharpPct = gameSharpenIni(gs);' not in dev or 'L"game_sharpening"' not in dev: out.append('the setting is not read from ffxv_dlss.ini at start')
     mc = code(menu)
-    row = re.search(r'label\("Game sharpening"\);.*?pad::typedSlider\("##gamesharp", gameSharp, 0, 200, 5, gameSharp \? "%d%%" : "Off", boxW, &typing\)\) \{\s*'
-                    r'gameSharpenSet\(gameSharp\);\s*iniSet\(L"dlss", L"game_sharpening", gameSharp\);', mc, re.S)
+    # both layouts draw slider rows from sliderSpec and save through setSlider; the desktop's through a typed box
+    row = re.search(r'case pages::kGameSharpening: return \{ 0, 200, 5, s\.gameSharp, s\.gameSharp \? "%d%%" : "Off" \};', mc) and \
+          re.search(r'case pages::kGameSharpening: gameSharpenSet\(v\); iniSet\(L"dlss", L"game_sharpening", v\); break;', mc)
     if not row: out.append('the Game sharpening row does not set and save the setting from a typed slider')
-    if not re.search(r'label\("Sharpening"\);\s*const bool sharpChanged = pad::typedSlider\("##sharp", sharp, 0, 100, 1,', mc):
+    if not re.search(r'case pages::kSharpening: return \{ 0, 100, 1, s\.sharp,', mc) or \
+            not re.search(r'if \(pad::typedSlider\("##v", val, sp\.lo, sp\.hi, sp\.step, sp\.fmt, boxW, &typing\)\) setSlider\(r\.id, val\);', mc):
         out.append('the Sharpening row has no typed box')
-    if mc.find('label("Game sharpening")') < mc.find('label("Sharpening")'): out.append('Game sharpening is not below Sharpening')
+    if mc.find('add(kGameSharpening, "Game sharpening"') < mc.find('add(kSharpening, "Sharpening"'): out.append('Game sharpening is not below Sharpening')
     # the box: digits only, out of controller navigation; Esc while typing leaves the box, not the menu; keys only while in front
     if 'ImGuiInputTextFlags_CharsDecimal' not in ts or 'PushItemFlag(ImGuiItemFlags_NoNav, true)' not in ts:
         out.append('the typed box takes more than numbers, or the controller can move onto it')
@@ -93,13 +96,14 @@ broken = {
     'other draw call never checked': (main.replace('const int other = gameSharpenOtherCall(g_gsDraws);', 'const int other = -1;', 1), menu, pad, dlss),
     'CS ranged buffers not restored': (main.replace('ctx1->CSSetConstantBuffers1(0, 2, cb, cbFirst, cbNum);', 'ctx1->CSSetConstantBuffers1(0, 1, cb, cbFirst, cbNum);', 1), menu, pad, dlss),
     'CS buffers not restored': (main.replace('    else ctx->CSSetConstantBuffers(0, 2, cb);\n', '', 1), menu, pad, dlss),
-    'Game sharpening above Sharpening': (main, menu.replace('label("Sharpening");', 'label("Game sharpening"); label("Sharpening");', 1), pad, dlss),
+    'Game sharpening above Sharpening': (main, menu.replace('add(kSharpening, "Sharpening", kSlider, false);', 'add(kGameSharpening, "Game sharpening", kSlider, false); add(kSharpening, "Sharpening", kSlider, false);', 1), pad, dlss),
     'pass not handed over': (main.replace('        gameSharpenDraw(ctx, c, s);\n', '', 1), menu, pad, dlss),
     'ini not read': (main.replace('g_gameSharpPct = gameSharpenIni(gs);', 'g_gameSharpPct = 100;', 1), menu, pad, dlss),
-    'not set': (main, menu.replace('        gameSharpenSet(gameSharp);\n', '', 1), pad, dlss),
-    'not saved': (main, menu.replace('        iniSet(L"dlss", L"game_sharpening", gameSharp);\n', '', 1), pad, dlss),
-    'no box on Game sharpening': (main, menu.replace('pad::typedSlider("##gamesharp"', 'pad::padSlider("##gamesharp"', 1), pad, dlss),
-    'no box on Sharpening': (main, menu.replace('pad::typedSlider("##sharp"', 'pad::padSlider("##sharp"', 1), pad, dlss),
+    'not set': (main, menu.replace('case pages::kGameSharpening: gameSharpenSet(v); ', 'case pages::kGameSharpening: ', 1), pad, dlss),
+    'not saved': (main, menu.replace('gameSharpenSet(v); iniSet(L"dlss", L"game_sharpening", v);', 'gameSharpenSet(v);', 1), pad, dlss),
+    'Game sharpening range': (main, menu.replace('return { 0, 200, 5, s.gameSharp,', 'return { 0, 100, 5, s.gameSharp,', 1), pad, dlss),
+    'no box on the sliders': (main, menu.replace('if (pad::typedSlider("##v", val,', 'if (pad::padSlider("##v", val,', 1), pad, dlss),
+    'Sharpening range': (main, menu.replace('case pages::kSharpening: return { 0, 100, 1,', 'case pages::kSharpening: return { 0, 100, 5,', 1), pad, dlss),
     'box takes any text': (main, menu, pad.replace('ImGuiInputTextFlags_CharsDecimal | ', '', 1), dlss),
     'box in navigation': (main, menu, pad.replace('ImGui::PushItemFlag(ImGuiItemFlags_NoNav, true);', 'ImGui::PushItemFlag(ImGuiItemFlags_NoNav, false);', 1), dlss),
     'Esc while typing closes': (main, menu.replace(' && !g_typing)', ')', 1), pad, dlss),

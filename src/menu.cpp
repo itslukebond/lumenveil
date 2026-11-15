@@ -10,6 +10,7 @@
 #include "menu_pad.h"
 #include "menu_look.h"
 #include "menu_deck.h"
+#include "menu_pages.h"
 #include "game_config.h"
 #include "xess_rules.h"
 #include "antilag_rules.h"
@@ -92,10 +93,10 @@ pad::PadView g_padView;
 bool g_padUsed, g_padOpened, g_padBusy, g_padRelease;
 bool g_typing;  // last frame a setting's box was being typed in: Esc then leaves the box, not the menu
 // The Steam Deck layout (menu_deck.h): g_isDeck, a Steam Deck was detected; g_layout, [overlay] layout (0 Automatic,
-// 1 Steam Deck, 2 Desktop); g_deckOpen, the menu shows the Deck layout (picked when it opens, changed by the Portable
-// mode switch through g_swap, applied in compose). Its fonts are built at g_deckFontK times their design size, on every
+// 1 Steam Deck, 2 Desktop); g_deckOpen, the menu shows the Deck layout (picked when it opens, changed by the layout
+// button through g_swap, applied in compose). Its fonts are built at g_deckFontK times their design size, on every
 // machine, so a PC can switch to the Deck layout without a restart. g_focusPortable: the desktop menu has just taken
-// over from the Deck layout and focuses its Portable mode switch.
+// over from the Deck layout and focuses its layout button.
 bool g_isDeck, g_deckOpen, g_focusPortable;
 deck::Swap g_swap;
 int g_layout;
@@ -563,50 +564,23 @@ const Accent kAccents[] = {
 };
 
 // Upscalers by id (0 DLSS, 1 FSR, 2 XeSS) and frame generation backends by id (0 DLSS-G, 1 FSR, 2 XeSS), one row each. The vendors'
-// DLLs are not shipped with the mod: the player copies them in from the vendors' SDKs (the install scripts do it).
-struct Upscaler { const char *name, *shortName; Vendor vendor; const wchar_t* file; const char *missing, *tested; };
+// DLLs are not shipped with the mod: the player copies them in from the vendors' SDKs (the install scripts do it). The
+// menu's texts about them live in menu_pages.h.
+struct Upscaler { const char *name, *shortName; Vendor vendor; const wchar_t* file; };
 const Upscaler kUpscalers[] = {
-    { "NVIDIA DLSS", "DLSS", kNvidia, L"ffxv_dlss\\nvngx_dlss.dll",
-      "nvngx_dlss.dll not found. Download NVIDIA's DLSS SDK (github.com/NVIDIA/DLSS), copy "
-      "lib\\Windows_x86_64\\rel\\nvngx_dlss.dll into the game's ffxv_dlss folder and restart the game.", nullptr },
-    { "AMD FSR", "FSR", kAmd, L"ffxv_dlss\\fidelityfx\\amd_fidelityfx_loader_dx12.dll",
-      "AMD's FSR files not found. Put FidelityFX-SDK-2.4.0.zip in your Downloads folder and run the installer again, or "
-      "copy the three amd_fidelityfx_*_dx12.dll files from Kits\\FidelityFX\\signedbin into ffxv_dlss\\fidelityfx. "
-      "INSTALL.txt has the download link.",
-      "Tested on an NVIDIA GeForce RTX 5090 only, where AMD's files run FSR 3.1. Untested on AMD Radeon cards and with "
-      "AMD's FSR 4." },
-    { "Intel XeSS", "XeSS", kIntel, L"ffxv_dlss\\xess\\libxess.dll",
-      "Intel's XeSS files not found. Put the XeSS SDK 3.0.2 zip in your Downloads folder and run the installer again, or "
-      "copy libxess.dll, libxess_fg.dll and libxell.dll from its bin folder into ffxv_dlss\\xess. INSTALL.txt has the "
-      "download link.",
-      "Tested on an NVIDIA GeForce RTX 5090 only. Untested on Intel Arc." },
+    { "NVIDIA DLSS", "DLSS", kNvidia, L"ffxv_dlss\\nvngx_dlss.dll" },
+    { "AMD FSR", "FSR", kAmd, L"ffxv_dlss\\fidelityfx\\amd_fidelityfx_loader_dx12.dll" },
+    { "Intel XeSS", "XeSS", kIntel, L"ffxv_dlss\\xess\\libxess.dll" },
 };
-struct Backend { const char* name; Vendor vendor; const char* tested; };
+struct Backend { const char* name; Vendor vendor; };
 const Backend kBackends[] = {
-    { "NVIDIA DLSS Frame Generation", kNvidia, nullptr },
-    { "AMD FSR Frame Generation", kAmd, kUpscalers[1].tested },
-    { "Intel XeSS Frame Generation", kIntel, kUpscalers[2].tested },
+    { "NVIDIA DLSS Frame Generation", kNvidia },
+    { "AMD FSR Frame Generation", kAmd },
+    { "Intel XeSS Frame Generation", kIntel },
 };
 constexpr int kUpscalerCount = IM_ARRAYSIZE(kUpscalers), kBackendCount = IM_ARRAYSIZE(kBackends);
 Vendor backendVendor(int b) { return b >= 0 && b < kBackendCount ? kBackends[b].vendor : kNeutral; }
 const char* syncName() { return g_vendorId == 0x1002 ? "FreeSync" : g_vendorId == 0x8086 ? "Adaptive Sync" : "G-Sync"; }
-
-// A note under a setting: the small font in `c`, indented to the setting names, wrapping at the window edge.
-void note(const ImVec4& c, const char* fmt, ...) IM_FMTARGS(2);
-void note(const ImVec4& c, const char* fmt, ...) {
-    ImGui::PushFont(g_small);
-    ImGui::Indent(22 * g_scale);
-    ImGui::PushStyleColor(ImGuiCol_Text, c);
-    va_list a;
-    va_start(a, fmt);
-    ImGui::TextV(fmt, a);
-    va_end(a);
-    ImGui::PopStyleColor();
-    ImGui::Unindent(22 * g_scale);
-    ImGui::PopFont();
-}
-// A "tested on" note.
-void testedNote(const char* text) { note(look::kDim, "%s", text); }
 
 // The counter's frame time graph in a..b: one point per presented frame at its age over 2 s, redrawn every frame, the
 // vertical scale eased toward max(average x 2.2, highest x 1.1) so a stutter does not make the line jump.
@@ -788,585 +762,477 @@ struct DesktopLook {
     DesktopLook& operator=(const DesktopLook&) = delete;
 };
 
+// ---- the pages both layouts draw (menu_pages.h) ----------------------------------------------------------------------
+// The state the page model reads, from the mod's own: the same reads and rules both menus have always used. The text it
+// points at (versions) stays valid until the next call.
+pages::State fillState() {
+    auto missing = [](const wchar_t* f) { return GetFileAttributesW(path(f).c_str()) == INVALID_FILE_ATTRIBUTES; };
+    const bool nvidiaGpu = g_vendorId == 0x10DE, intelGpu = g_vendorId == 0x8086;
+    static DlssInfo di;
+    di = dlssInfo();
+    pages::State s;
+    s.nvidia = nvidiaGpu;
+    s.portable = g_deckOpen;
+    const bool activeKnown = di.active >= 0 && di.active < kUpscalerCount;
+    s.upscaler = di.upscaler >= 0 && di.upscaler < kUpscalerCount ? di.upscaler : -1;
+    // the upscaler wanted: the one chosen, else what Auto runs, else what Auto picks on this GPU
+    s.want = s.upscaler >= 0 ? s.upscaler : activeKnown ? di.active : nvidiaGpu ? 0 : intelGpu && !missing(kUpscalers[2].file) ? 2 : 1;
+    s.active = activeKnown ? di.active : -1;
+    s.upOn = dlssEnabled();
+    s.wantMissing = missing(kUpscalers[s.want].file);
+    s.dlssVersion = di.version; s.fsrVersion = di.fsrVersion; s.xessVersion = di.xessVersion;
+    const ScaleState& ss = scaleState();
+    s.ratio = ss.ratio;
+    s.live = di.outW ? int(std::lround(100.0 * di.inH / di.outH)) : 0;
+    s.upPct = ultraPerformancePct(s.want == 2);  // 0 with XeSS: no game scale value fits it below 50% (xess_rules.h)
+    s.xessLowest = xessLowestPct();
+    s.xessBelow = s.want == 2 && ((ss.ratio && ss.ratio < xessLowestPct()) || xessInputBelowRange());
+    if (s.live) { s.inW = di.inW; s.inH = di.inH; s.outW = di.outW; s.outH = di.outH; }
+    s.dispW = di.dispW; s.dispH = di.dispH;
+    s.preset = di.preset; s.sharp = di.sharpness; s.gameSharp = gameSharpenGet();
+    // frame generation: the backend decides which swapchain the presenter creates at launch, so a change applies at the
+    // next launch. Auto resolves as the presenter does (fgPickBackend).
+    const FgStatus st = fgStatus();
+    const FgSettings fs = fgSettings();
+    const FgPick& fp = fgPick();
+    s.dlssg = !missing(L"ffxv_dlss\\streamline\\nvngx_dlssg.dll");
+    s.fsrFiles = !missing(kUpscalers[1].file);
+    s.fsrFgDll = !missing(L"ffxv_dlss\\fidelityfx\\amd_fidelityfx_framegeneration_dx12.dll");
+    s.xessFgFiles = xessFgPresent();
+    auto resolve = [&](int b) { return fgPickBackend(b, g_vendorId, s.dlssg, s.xessFgFiles); };
+    s.running = st.backend >= 0 ? st.backend : resolve(fp.launchBackend);
+    s.picked = resolve(fp.backend - 1);
+    s.backend = fp.backend; s.launchBackend = fp.launchBackend; s.launchEnable = fp.launchEnable;
+    s.fgBackend = st.backend >= 0 && st.backend < kBackendCount ? st.backend : -1;
+    s.fgAvailable = st.available; s.generating = st.generating; s.formatRefused = st.formatRefused;
+    // FSR or XeSS is ready but FG was off at launch (their swapchains are made only then): it can be turned on for the next
+    s.offAtLaunch = !st.available && !fp.launchEnable && !st.formatRefused
+                    && ((s.running == 1 && s.fsrFiles && s.fsrFgDll) || (s.running == 2 && s.xessFgFiles));
+    s.dynamicSupported = st.dynamicSupported; s.maxGenerated = st.maxGenerated;
+    s.fgEnable = fs.enable; s.frames = fs.frames; s.target = fs.target; s.limit = fs.limit; s.reflex = fs.reflex; s.antilag = fs.antilag;
+    s.dlssgVersion = dlssgVersion(); s.fsrFgVersion = fsrFgVersion(); s.xessFgVersion = xessFgVersion();
+    s.shown = g_fpsShown; s.rendered = g_fpsRendered;
+    s.al2Shown = al2MenuShown(st.antilag, st.backend); s.al2Ready = st.antilag == kAl2Ready; s.al2Linux = st.antilag == kAl2Wine;
+    s.paces = st.backend == 1 || di.active == 1 || di.active == 2;  // the presenter paces frames itself with FSR or XeSS
+    // the cap applies through Reflex when Streamline runs, else through the presenter's pacing or the game's VSync
+    s.capUsable = st.available || st.backend >= 0 || di.active == 1 || di.active == 2 || st.vsyncPaced;
+    s.autoCap = st.autoCap; s.sync = syncName();
+    s.counter = g_counter; s.corner = g_corner; s.hud = uiSharp();
+    return s;
+}
+
+// A list row's choices (short names) and the current one (-1: a value the list does not hold).
+int choices(pages::Id id, const pages::State& s, const char* names[8], int* cur) {
+    static char scaleNames[5][48], custom[24];
+    int n = 0;
+    *cur = -1;
+    switch (id) {
+    case pages::kUpscaler: case pages::kBackend:
+        names[n++] = "Auto";
+        for (int i = 0; i < 3; ++i) names[n++] = pages::upName(i);
+        *cur = id == pages::kUpscaler ? s.upscaler + 1 : std::clamp(s.backend, 0, 3);
+        break;
+    case pages::kScaling: {
+        pages::Scale m[5];
+        n = pages::scaleModes(s, m);
+        for (int i = 0; i < n; ++i) {
+            snprintf(scaleNames[i], sizeof scaleNames[i], "%s \xC2\xB7 %d%%", m[i].name, m[i].pct);
+            names[i] = scaleNames[i];
+            if (m[i].pct == s.ratio) *cur = i;
+        }
+        break;
+    }
+    case pages::kDlssModel:
+        for (; n < 7; ++n) names[n] = pages::kPresetNames[n];
+        *cur = pages::presetIndex(s.preset);
+        if (*cur < 0) { snprintf(custom, sizeof custom, "Model %c \xC2\xB7 ini", char('A' + s.preset - 1)); names[n] = custom; *cur = n++; }
+        break;
+    case pages::kFgMode: {
+        static char modeNames[6][8];
+        if (s.fgBackend != 0) { names[n++] = "2\xC3\x97"; *cur = 0; break; }  // FSR and XeSS generate 2x
+        if (s.dynamicSupported) { names[n++] = "Dynamic"; if (s.frames == 0) *cur = 0; }
+        for (unsigned k = 1; k <= std::max(1u, s.maxGenerated) && k <= 5; ++k) {
+            snprintf(modeNames[k], sizeof modeNames[k], "%u\xC3\x97", k + 1);
+            if (s.frames == int(k)) *cur = n;
+            names[n++] = modeNames[k];
+        }
+        if (*cur < 0) *cur = 0;
+        break;
+    }
+    case pages::kLowLatency: {
+        const pages::Latency l = pages::latency(s);
+        if (l == pages::kReflex) { for (; n < 3; ++n) names[n] = pages::kReflexNames[n]; *cur = std::clamp(s.reflex, 0, 2); }
+        else { names[n++] = "Off"; names[n++] = "On"; *cur = l == pages::kXell ? s.reflex > 0 : s.al2Ready && s.antilag; }
+        break;
+    }
+    case pages::kFrameCap: names[n++] = "Off"; names[n++] = "Auto"; names[n++] = "Custom"; *cur = pages::capMode(s); break;
+    case pages::kPosition: for (; n < 4; ++n) names[n] = pages::kCorners[n]; *cur = std::clamp(s.corner, 0, 3); break;
+    default: break;
+    }
+    return n;
+}
+
+// Settings changed from either layout, saved through the same setters and ini keys the menu has always used.
+void saveFg(const FgSettings& fs) {
+    fgApply(fs);
+    iniSet(L"fg", L"enable", fs.enable); iniSet(L"fg", L"frames", fs.frames); iniSet(L"fg", L"target", fs.target); iniSet(L"fg", L"limit", fs.limit);
+    iniSet(L"fg", L"reflex", fs.reflex); iniSet(L"fg", L"antilag", fs.antilag);
+}
+void setScale(int pct) {
+    ScaleState& ss = scaleState();
+    if (!ss.ratio || pct == ss.ratio) return;
+    ss.ratio = pct;
+    WritePrivateProfileStringW(L"BasicSettings", L"RenderingResolutionRatio", std::to_wstring(ss.ratio).c_str(), ss.cfg.c_str());
+}
+// A list row set to choice i (from choices).
+void pick(pages::Id id, const pages::State& s, int i) {
+    FgSettings fs = fgSettings();
+    switch (id) {
+    case pages::kUpscaler: dlssSetUpscaler(i - 1); iniSet(L"dlss", L"upscaler", i - 1); break;
+    case pages::kScaling: { pages::Scale m[5]; if (i >= 0 && i < pages::scaleModes(s, m)) setScale(m[i].pct); break; }
+    case pages::kDlssModel: if (i >= 0 && i < 7) { iniSet(L"dlss", L"preset", pages::kPresets[i]); dlssSetPreset(pages::kPresets[i]); } break;
+    case pages::kBackend: fgPick().backend = i; iniSet(L"fg", L"backend", i - 1); break;
+    case pages::kFgMode: if (s.fgBackend == 0) { fs.frames = s.dynamicSupported ? i : i + 1; saveFg(fs); } break;
+    case pages::kLowLatency: {
+        const pages::Latency l = pages::latency(s);
+        if (l == pages::kReflex) fs.reflex = i;
+        else if (l == pages::kXell) { if (i == (fs.reflex > 0 ? 1 : 0)) return; fs.reflex = i; }  // the ini's Boost is kept until changed
+        else { if (!s.al2Ready || i == (fs.antilag ? 1 : 0)) return; fs.antilag = i; }
+        saveFg(fs);
+        break;
+    }
+    case pages::kFrameCap: fs.limit = i == 0 ? 0 : i == 1 ? -1 : std::max(fgStatus().autoCap, 60); saveFg(fs); break;
+    case pages::kPosition: g_corner = i; iniSet(L"overlay", L"corner", g_corner); break;
+    default: break;
+    }
+}
+// A list row stepped by d (-1 / +1), wrapping; a value the list does not hold steps to the first (right) or last (left).
+void stepList(pages::Id id, const pages::State& s, int d) {
+    const char* names[8]; int cur;
+    const int n = choices(id, s, names, &cur);
+    if (n < 2 || !d) return;
+    pick(id, s, cur < 0 ? (d > 0 ? 0 : n - 1) : look::stepWrap(cur, d, n));
+}
+// A toggle row flipped.
+void flipToggle(pages::Id id) {
+    switch (id) {
+    case pages::kUpEnabled: dlssToggle(); break;
+    case pages::kFgEnabled: { FgSettings fs = fgSettings(); fs.enable = fs.enable ? 0 : 1; saveFg(fs); break; }
+    case pages::kCounter: g_counter = !g_counter; iniSet(L"overlay", L"enable", g_counter); break;
+    case pages::kHud: { const bool on = !uiSharp(); uiSetSharp(on); iniSet(L"ui", L"sharp", on); break; }
+    default: break;
+    }
+}
+// A slider row's range, step and value, and its setter.
+struct SliderSpec { int lo, hi, step, value; const char* fmt; };
+SliderSpec sliderSpec(pages::Id id, const pages::State& s) {
+    switch (id) {
+    case pages::kSharpening: return { 0, 100, 1, s.sharp, s.sharp ? "%d%%" : "Off" };
+    case pages::kGameSharpening: return { 0, 200, 5, s.gameSharp, s.gameSharp ? "%d%%" : "Off" };
+    case pages::kTarget: return { 60, 480, 5, s.target, "%d fps" };
+    default: return { 30, 480, 5, s.limit > 0 ? s.limit : std::max(s.autoCap, 60), "%d fps" };
+    }
+}
+void setSlider(pages::Id id, int v) {
+    FgSettings fs = fgSettings();
+    switch (id) {
+    case pages::kSharpening: dlssSetSharpness(v); iniSet(L"dlss", L"sharpness", v); break;
+    case pages::kGameSharpening: gameSharpenSet(v); iniSet(L"dlss", L"game_sharpening", v); break;
+    case pages::kTarget: fs.target = v; saveFg(fs); break;
+    case pages::kCap: if (fs.limit > 0) { fs.limit = v; saveFg(fs); } break;
+    default: break;
+    }
+}
+// The layout button's pick: the layout is saved to [overlay] layout (2 Desktop, 1 Portable) and changes on the next frame.
+void switchLayout(bool portable) {
+    if (!g_deck26) return;  // the Portable fonts did not load
+    g_layout = portable ? 1 : 2;
+    iniSet(L"overlay", L"layout", g_layout);
+    g_swap.flip(portable, ImGui::GetTime(), g_deckOpen);
+}
+
+ImVec4 toneColour(pages::Tone t) {
+    return t == pages::kAmber ? kAmber : t == pages::kGreen ? look::kGo : t == pages::kDim ? look::kDim : look::kInk2;
+}
+// The help box's text at p, `w` wide: each paragraph wrapped, one line every `step`, three lines at most. A text that
+// needs more is cut and logged once.
+void drawHelp(ImDrawList* dl, ImFont* f, float size, ImVec2 p, float w, float step, pages::Id id, const pages::Help& h) {
+    static bool logged[pages::kIdCount];
+    int line = 0;
+    for (int i = 0; i < h.n; ++i) {
+        const int left = pages::kHelpLines - line;
+        const int n = look::wrapText(left > 0 ? dl : nullptr, f, size, ImVec2(p.x, p.y + line * step), w, step, h.line[i].text, toneColour(h.line[i].tone), std::max(0, left));
+        line += n;
+    }
+    if (line > pages::kHelpLines && !logged[id]) { logged[id] = true; logf("menu: help text for row %d needs %d lines", int(id), line); }
+}
+// The status line at p: the upscaler and its version in its vendor's colour, render size → output size, and frame
+// generation's state.
+void drawStatus(ImDrawList* dl, ImFont* f, float size, ImVec2 p, const pages::Status& st) {
+    const float gap = f->CalcTextSizeA(size, FLT_MAX, 0, "   ").x;
+    float x = p.x;
+    auto put = [&](const char* t, const ImVec4& c) { if (!*t) return; dl->AddText(f, size, ImVec2(x, p.y), look::col(c), t); x += f->CalcTextSizeA(size, FLT_MAX, 0, t).x; };
+    put(st.up, st.upVendor >= 0 ? kAccents[st.upVendor].hi : look::kDim);
+    if (*st.size) { x += gap; put(st.size, look::kInk2); }
+    x += gap;
+    put("Frame generation ", look::kDim);
+    put(st.fg, st.fgTone == pages::kVendor && st.fgVendor >= 0 ? kAccents[st.fgVendor].hi : st.fgTone == pages::kDim ? look::kDim : look::kInk2);
+}
+
+// The desktop menu's page and the help box's row (kept while the mouse is off the rows); g_pageTurn: L1 or R1
+// from compose, applied by drawMenu.
+int g_deskPage;
+pages::Id g_deskHelp = pages::kUpscaler;
+int g_pageTurn;
+
+// The desktop menu's fixed slots, in its units (times g_scale) from the window's top: the top bar, the tabs, the rows (a
+// heading slot and seven rows), the help box (a hairline and three lines), the status line and the footer. The window
+// is always this tall: nothing moves between pages or states.
+struct DeskSlots {
+    static constexpr float kTop = 24, kBarH = 52, kTabsTop = 82, kTabsH = 32, kRowsTop = 122, kSubH = 26, kPitch = 36;
+    static constexpr float kHelpRule = kRowsTop + kSubH + 7 * kPitch + 8, kHelpTop = kHelpRule + 9, kHelpStep = 19;
+    static constexpr float kStatusTop = kHelpTop + 3 * kHelpStep + 8, kFootRule = kStatusTop + 24, kHintsTop = kFootRule + 9;
+    static constexpr float kFineTop = kHintsTop + 26, kHeight = kFineTop + 2 * 16.5f + 22;
+};
+
 void drawMenu() {
+    using Z = DeskSlots;
     const ImGuiViewport* vp = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos({ vp->Size.x * 0.5f, vp->Size.y * 0.5f }, ImGuiCond_Appearing, { 0.5f, 0.5f });
     const float s = g_scale;
     look::ctx().s = s; look::ctx().fontSmall = g_small;
     look::ctx().bob = look::bobX(ImGui::GetTime());  // the glove's sway, once a frame
-    ImGui::SetNextWindowSize({ 600 * s, 0 }, ImGuiCond_Always);
+    ImGui::SetNextWindowSize({ 600 * s, Z::kHeight * s }, ImGuiCond_Always);
     DesktopLook styled;  // popped after End
     ImGui::Begin("Lumenveil", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoCollapse |
-                                       ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoResize);
+                                       ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoScrollbar |
+                                       ImGuiWindowFlags_NoScrollWithMouse);
     ImGuiWindow* win = ImGui::GetCurrentWindow();
+    ImDrawList* dl = win->DrawList;
     const ImVec2 wa = win->Pos, wb(win->Pos.x + win->Size.x, win->Pos.y + win->Size.y);
     ImGui::PushClipRect(ImVec2(wa.x, wa.y - 6 * s), wb, false);  // the streak's glow reaches above the panel
-    look::panel(win->DrawList, wa, wb, look::kMenu, look::panelEnd(win));  // the scrollbar, drawn by Begin, stays on top
+    look::panel(dl, wa, wb, look::kMenu);
     ImGui::PopClipRect();
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10 * s, 8 * s));  // the lists' padding; the menu's is set
+    // the first row takes the focus when the menu opens (not the layout button above it, unless the layout has just
+    // changed: then the button keeps it) and on every page change
+    const bool padOpened = g_padOpened, opening = ImGui::IsWindowAppearing() && !g_focusPortable;
     if (g_padOpened) { pad::focusFirst(); g_padOpened = false; }
-    ImGui::PushTextWrapPos(0.0f);  // notes wrap at the window edge instead of being clipped
+    const float x0 = win->Pos.x + 30 * s, cw = 540 * s, flagW = 22 * s;
     const float labelW = 30 * s + 212 * s;  // the widgets' column, from the window's edge
-    // a setting's row: the selected row's look, the name indented past the glove, the widget to the right edge
-    auto label = [&](const char* t) {
-        look::row();
-        ImGui::AlignTextToFramePadding();
-        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 22 * s);
-        ImGui::TextUnformatted(t);
-        ImGui::SameLine(labelW);
-        look::ctx().widgetX = ImGui::GetCursorScreenPos().x;
-        ImGui::SetNextItemWidth(-FLT_MIN);
-    };
-    auto missing = [](const wchar_t* f) { return GetFileAttributesW(path(f).c_str()) == INVALID_FILE_ATTRIBUTES; };
-    const bool nvidiaGpu = g_vendorId == 0x10DE, intelGpu = g_vendorId == 0x8086;
+    const pages::State st = fillState();
 
-    if (g_logo || g_logo11) {  // centred, 58% of the content width
-        const float avail = ImGui::GetContentRegionAvail().x, w = avail * 0.58f;
-        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (avail - w) * 0.5f);
-        ImGui::Image(g_native ? (ImTextureID)(uintptr_t)g_logo11 : (ImTextureID)gpuAt(g_srvHeap, 2).ptr, { w, w * g_logoH / g_logoW });
+    // ---- top bar: the logo left, the layout button right
+    if (g_logo || g_logo11) {
+        const float h = 40 * s, w = h * g_logoW / g_logoH;
+        ImGui::SetCursorPos(ImVec2(30 * s, (Z::kTop + (Z::kBarH - h) * 0.5f) * s));
+        ImGui::Image(g_native ? (ImTextureID)(uintptr_t)g_logo11 : (ImTextureID)gpuAt(g_srvHeap, 2).ptr, { w, h });
     }
-
-    // ---- Upscaling: its controls take the colour of the upscaler running, else of the one the setting asks for
-    look::SeparatorText("Upscaling");
-    const DlssInfo di = dlssInfo();
-    const bool activeKnown = di.active >= 0 && di.active < kUpscalerCount;
-    // the upscaler wanted: the one chosen, else what Auto runs, else what Auto picks on this GPU
-    const int want = di.upscaler >= 0 && di.upscaler < kUpscalerCount ? di.upscaler : activeKnown ? di.active
-                   : nvidiaGpu ? 0 : intelGpu && !missing(kUpscalers[2].file) ? 2 : 1;
+    bool buttonSel = false;
     {
-        const char* names[1 + kUpscalerCount] = { "Auto  (DLSS on NVIDIA, XeSS on Intel, else FSR)" };
-        for (int i = 0; i < kUpscalerCount; ++i) names[1 + i] = kUpscalers[i].name;
-        int us = di.upscaler >= -1 && di.upscaler < kUpscalerCount ? di.upscaler + 1 : 0;
-        label("Upscaler");
-        if (look::option("##upscaler", &us, names, 1 + kUpscalerCount)) { dlssSetUpscaler(us - 1); iniSet(L"dlss", L"upscaler", us - 1); }
-        if (want == 0 && !nvidiaGpu) note(kAmber, "DLSS needs an NVIDIA GeForce RTX card. The game uses its own anti-aliasing.");
-        else if (missing(kUpscalers[want].file)) note(kAmber, "%s", kUpscalers[want].missing);
-        if (di.active == 1 && *di.fsrVersion)
-            note(look::kDim, di.fsrVersion[0] >= '4' ? "AMD FSR %s (machine learning)." : "AMD FSR %s.", di.fsrVersion);
-        if (di.active == 2 && *di.xessVersion) note(look::kDim, "Intel XeSS %s.", di.xessVersion);
-        if (kUpscalers[want].tested) testedNote(kUpscalers[want].tested);
-        bool on = dlssEnabled();
-        label("Enabled");
-        bool flip = ImGui::Checkbox("##upscale", &on);
-        flip |= pad::padTick(on);
-        look::toggleLook(on);
-        if (flip) dlssToggle();
+        const float bw = 230 * s, bh = 34 * s;
+        ImGui::SetCursorScreenPos(ImVec2(x0 + cw - bw, win->Pos.y + (Z::kTop + (Z::kBarH - 34) * 0.5f) * s));
+        const int want = look::layoutButton("##layout", false, g_deck26 != nullptr, bw, bh);
+        buttonSel = ImGui::IsItemHovered() || (ImGui::IsItemFocused() && GImGui->NavCursorVisible);
+        look::takeFocus(g_focusPortable, g_padUsed);
+        if (want >= 0) switchLayout(want == 1);
     }
 
-    // Scaling mode = the game's RenderingResolutionRatio, read at launch (so a change applies after a restart)
-    struct Mode { const char* name; int pct; };
-    const int upPct = ultraPerformancePct(want == 2);  // 0 with XeSS: no game scale value fits it below 50% (xess_rules.h)
-    const Mode scaleModes[] = { { "DLAA", 100 }, { "Quality", 67 }, { "Balanced", 58 }, { "Performance", 50 }, { "Ultra Performance", upPct ? upPct : 33 } };
-    const int modeCount = upPct ? 5 : 4;  // Ultra Performance last, left out when not offered
-    ScaleState& ss = scaleState();
-    const std::wstring& cfg = ss.cfg;
-    int& ratio = ss.ratio;
-    auto modeText = [&](char* buf, size_t n, const char* name, int pct) {
-        if (di.dispW) snprintf(buf, n, "%s  \xC2\xB7  %d%%  \xC2\xB7  %u\xC3\x97%u \xE2\x86\x92 %u\xC3\x97%u", name, pct,
-                               di.dispW * pct / 100, di.dispH * pct / 100, di.dispW, di.dispH);
-        else snprintf(buf, n, "%s  \xC2\xB7  %d%%", name, pct);
-    };
-    char preview[96] = "GraphicsConfig.ini not found";
-    if (ratio) {
-        const Mode* cur = nullptr;
-        for (const Mode& m : scaleModes) if (m.pct == ratio) cur = &m;  // includes Ultra Performance's 33 when not offered
-        if (!cur && (ratio == 33 || ratio == 34)) cur = &scaleModes[4];  // the other upscaler's Ultra Performance
-        modeText(preview, sizeof preview, cur ? cur->name : "Custom", ratio);
-    }
-    label("Scaling mode");
-    ImGui::BeginDisabled(!ratio);
-    bool scaleOpen = false;
-    const int scaleStep = look::optionFrame("##scale", preview, &scaleOpen);
-    if (scaleOpen) {
-        for (int i = 0; i < modeCount; ++i) {
-            const Mode& m = scaleModes[i];
-            char t[96]; modeText(t, sizeof t, m.name, m.pct);
-            if (ImGui::Selectable(t, m.pct == ratio) && m.pct != ratio) {
-                ratio = m.pct;
-                WritePrivateProfileStringW(L"BasicSettings", L"RenderingResolutionRatio", std::to_wstring(ratio).c_str(), cfg.c_str());
-            }
-        }
-        ImGui::EndCombo();
-    }
-    if (scaleStep) {  // ‹ or ›: the next mode in the list, written as a pick from the list is
-        int cur = -1;
-        for (int i = 0; i < modeCount; ++i) if (scaleModes[i].pct == ratio) cur = i;
-        ratio = scaleModes[cur < 0 ? (scaleStep > 0 ? 0 : modeCount - 1) : look::stepWrap(cur, scaleStep, modeCount)].pct;
-        WritePrivateProfileStringW(L"BasicSettings", L"RenderingResolutionRatio", std::to_wstring(ratio).c_str(), cfg.c_str());
-    }
-    ImGui::EndDisabled();
-    const int live = di.outW ? int(std::lround(100.0 * di.inH / di.outH)) : 0;
-    if (live) note(look::kDim, "Now rendering %u\xC3\x97%u \xE2\x86\x92 %u\xC3\x97%u (%d%%).", di.inW, di.inH, di.outW, di.outH, live);
-    if (ratio && live && std::abs(live - ratio) > 1) note(look::kGo, "Restart the game to apply the new scaling mode.");
-    else if (ratio && !live) note(look::kDim, "Changes apply the next time the game starts.");
-    if (want == 2 && ((ratio && ratio < xessLowestPct()) || xessInputBelowRange())) {
-        if (ultraPerformancePct(true))
-            note(kAmber, "Intel XeSS needs a scaling mode of %d%% or more. Pick Ultra Performance again (%d%% with XeSS) "
-                                       "and restart the game.", xessLowestPct(), xessLowestPct());
-        else
-            note(kAmber, "Intel XeSS needs a scaling mode of %d%% or more. Pick Performance and restart the game.", xessLowestPct());
-    }
+    // ---- tabs: a click or L1 / R1 (from compose) change page; a new page starts on its first row
+    static const char* const kPageNames[] = { "Upscaling", "Frame generation", "Overlay" };
+    ImGui::SetCursorScreenPos(ImVec2(x0, win->Pos.y + Z::kTabsTop * s));
+    int to = look::tabs(g_deskPage, kPageNames, 3, cw, Z::kTabsH * s);
+    if (g_pageTurn) { to = pages::turn(g_deskPage, g_pageTurn); g_pageTurn = 0; }
+    const bool turned = to != g_deskPage;
+    if (turned) g_deskPage = to;
 
-    if (want == 0 && (di.active == 0 || !activeKnown)) {  // DLSS's model; FSR picks its own
-        static const int presets[] = { 0, 11, 13, 12, 10, 6, 5 };
-        static const char* presetNames[] = { "Default  (NVIDIA picks per mode)", "K  \xC2\xB7  transformer, best quality",
-                                             "M  \xC2\xB7  transformer, made for Performance", "L  \xC2\xB7  transformer, made for Ultra Performance",
-                                             "J  \xC2\xB7  transformer, like K: less ghosting, more flicker",
-                                             "F  \xC2\xB7  CNN (deprecated)", "E  \xC2\xB7  CNN (deprecated)" };
-        // a preset this list doesn't know yet (a newer DLL's, set by hand in the ini) is kept and shown as such
-        const char* modelNames[IM_ARRAYSIZE(presets) + 1]; char custom[48];
-        int pi = -1, models = 0;
-        for (; models < IM_ARRAYSIZE(presets); ++models) { modelNames[models] = presetNames[models]; if (presets[models] == di.preset) pi = models; }
-        if (pi < 0) { snprintf(custom, sizeof custom, "%c  \xC2\xB7  set in ffxv_dlss.ini", 'A' + di.preset - 1); modelNames[models] = custom; pi = models++; }
-        label("DLSS model");
-        if (look::option("##preset", &pi, modelNames, models) && pi < IM_ARRAYSIZE(presets)) { iniSet(L"dlss", L"preset", presets[pi]); dlssSetPreset(presets[pi]); }
-        if (*di.version && atoi(di.version) < 310)
-            note(kAmber, "DLSS %s is older than 310: models J, K, L and M need 310 or newer, so NVIDIA's default is used.", di.version);
-    }
-    // the two sharpening rows: a slider and a box the value can be typed into, the same width in both rows
+    // ---- rows, in fixed slots
+    pages::Row rows[pages::kMaxRows]; int sub;
+    const int n = pages::rows(g_deskPage, st, rows, &sub);
+    if (n && (turned || pages::pageOf(g_deskHelp) != g_deskPage)) g_deskHelp = rows[0].id;
     const float boxW = 76 * s;
     bool typing = false;
-    int sharp = di.sharpness;
-    label("Sharpening");
-    const bool sharpChanged = pad::typedSlider("##sharp", sharp, 0, 100, 1, sharp ? "%d%%" : "Off", boxW, &typing);
-    look::sliderLook(sharp, 0, 100);
-    if (sharpChanged) { dlssSetSharpness(sharp); iniSet(L"dlss", L"sharpness", sharp); }
-    int gameSharp = gameSharpenGet();
-    label("Game sharpening");
-    ImGui::SetItemTooltip("The game's own sharpening, after anti-aliasing. 100%% is the game's look.");
-    if (pad::typedSlider("##gamesharp", gameSharp, 0, 200, 5, gameSharp ? "%d%%" : "Off", boxW, &typing)) {
-        gameSharpenSet(gameSharp);
-        iniSet(L"dlss", L"game_sharpening", gameSharp);
-    }
-    look::sliderLook(gameSharp, 0, 200);
-
-    // ---- Frame Generation: its controls take the colour of the backend picked, the readouts that of the one running
-    look::SeparatorText("Frame Generation");
-    const FgStatus st = fgStatus();
-    FgSettings fs = fgSettings();
-    bool changed = false;
-    // The backend decides which swapchain the presenter creates at launch, so a change applies at the next launch.
-    // Auto resolves as the presenter does (fgPickBackend): DLSS-G on an NVIDIA GPU with nvngx_dlssg.dll in place, XeSS-FG
-    // on an Intel GPU with Intel's three XeSS files, else FSR.
-    FgPick& fp = fgPick();
-    const int launchBackend = fp.launchBackend;
-    const bool launchEnable = fp.launchEnable;
-    int& backend = fp.backend;
-    const bool dlssg = !missing(L"ffxv_dlss\\streamline\\nvngx_dlssg.dll");
-    const bool fsrFiles = !missing(kUpscalers[1].file), fsrFgDll = !missing(L"ffxv_dlss\\fidelityfx\\amd_fidelityfx_framegeneration_dx12.dll");
-    const bool xessFgFiles = xessFgPresent();
-    auto resolve = [&](int b) { return fgPickBackend(b, g_vendorId, dlssg, xessFgFiles); };
-    const int running = st.backend >= 0 ? st.backend : resolve(launchBackend), picked = resolve(backend - 1);
-    // FSR or XeSS is ready but FG was off at launch (their swapchains are made only then): the setting can still be turned
-    // on for the next launch
-    const bool fsrOffAtLaunch = !st.available && !launchEnable && !st.formatRefused
-                                && ((running == 1 && fsrFiles && fsrFgDll) || (running == 2 && xessFgFiles));
-    {
-        const char* names[1 + kBackendCount] = { "Auto  (DLSS on NVIDIA, XeSS on Intel, else FSR)" };
-        for (int i = 0; i < kBackendCount; ++i) names[1 + i] = kBackends[i].name;
-        label("Backend");
-        if (look::option("##fgbackend", &backend, names, 1 + kBackendCount)) iniSet(L"fg", L"backend", backend - 1);
-        if ((backend - 1 != launchBackend && picked != running) || (fsrOffAtLaunch && fs.enable))
-            note(look::kGo, "Restart the game to switch frame generation.");
-        if (!st.available) {
-            if (running == 0 && dlssg)
-                note(look::kDim, "Not available: DLSS Frame Generation needs an RTX 40 or 50 series card. AMD FSR Frame Generation runs on this card.");
-            else if (running == 0)
-                note(kAmber, "nvngx_dlssg.dll not found. Copy it from the same DLSS SDK folder (lib\\Windows_x86_64\\rel) "
-                                           "into ffxv_dlss\\streamline and restart the game.");
-            else if (running == 2) {
-                if (!xessFgFiles)  // named here: the Upscaling section names Intel's files only while XeSS upscales
-                    note(kAmber, "Intel's XeSS frame generation needs libxess.dll, libxess_fg.dll and libxell.dll in "
-                                               "ffxv_dlss\\xess. Put the XeSS SDK 3.0.2 zip in your Downloads folder and run the "
-                                               "installer again, or copy them from its bin folder. INSTALL.txt has the download link.");
-                else if (st.formatRefused)
-                    note(look::kDim, "Not available: Intel XeSS frame generation does not take the game's HDR output format. "
-                                        "Turn HDR off in the game, or pick another backend.");
-                else if (launchEnable) note(look::kDim, "Not available: Intel XeSS frame generation did not start. ffxv_dlss.log has the reason.");
-            }
-            else if (!fsrFiles) note(kAmber, "AMD's FSR files not found (see Upscaling above).");
-            else if (!fsrFgDll)
-                note(kAmber, "amd_fidelityfx_framegeneration_dx12.dll not found in ffxv_dlss\\fidelityfx. FSR upscaling works without it.");
-            else if (launchEnable) note(look::kDim, "Not available: AMD FSR frame generation did not start. ffxv_dlss.log has the reason.");
+    float y = Z::kRowsTop;
+    for (int i = 0; i < n; ++i) {
+        const pages::Row& r = rows[i];
+        if (i == sub) {  // the heading slot: spaced capitals at its foot, then a rule fading out
+            const float hy = win->Pos.y + (y + Z::kSubH - 16) * s, tw = look::spacedText(dl, g_small, 12 * s, ImVec2(x0, hy), "LATENCY", 0.22f, look::kInk2);
+            look::fadeRule(dl, x0 + tw + 12 * s, x0 + cw, std::floor(hy + 12 * s * 0.55f), look::kRule);
+            y += Z::kSubH;
         }
-        if (st.available && st.backend == 0 && *dlssgVersion()) note(look::kDim, "NVIDIA DLSS frame generation %s.", dlssgVersion());
-        if (st.available && st.backend == 1 && *fsrFgVersion()) note(look::kDim, "AMD FSR frame generation %s.", fsrFgVersion());
-        if (st.available && st.backend == 2 && *xessFgVersion())
-            note(look::kDim, "Intel XeSS frame generation %s, with Xe Low Latency.", xessFgVersion());
-        // the tested-only note while the backend is picked, and while it still runs until the restart
-        const int noteB = kBackends[picked].tested ? picked : st.backend >= 0 && st.backend < kBackendCount && kBackends[st.backend].tested ? st.backend : -1;
-        if (noteB >= 0) testedNote(kBackends[noteB].tested);
-        ImGui::BeginDisabled(!st.available && !fsrOffAtLaunch);
-        bool on = fs.enable != 0;
-        label("Enabled");
-        bool fgFlip = ImGui::Checkbox("##fg", &on);
-        fgFlip |= pad::padTick(on);
-        look::toggleLook(on);
-        if (fgFlip) { fs.enable = on; changed = true; }
-        if (st.backend == 0) {  // DLSS-G modes: Dynamic (when supported), then 2x .. (max generated + 1)x; FSR and XeSS 2x
-            const char* modes[7]; char modeNames[6][8]; int n = 0, cur = 0;
-            if (st.dynamicSupported) modes[n++] = "Dynamic";
-            for (unsigned k = 1; k <= std::max(1u, st.maxGenerated) && k <= 5; ++k) {
-                snprintf(modeNames[k], sizeof modeNames[k], "%u\xC3\x97", k + 1);
-                if (fs.frames == int(k)) cur = n;
-                modes[n++] = modeNames[k];
-            }
-            label("Mode");
-            if (look::option("##mode", &cur, modes, n)) { fs.frames = st.dynamicSupported ? cur : cur + 1; changed = true; }
-            if (fs.frames == 0) {
-                label("Target fps");
-                changed |= pad::typedSlider("##target", fs.target, 60, 480, 5, "%d fps", boxW, &typing);
-                look::sliderLook(fs.target, 60, 480);
-            }
+        ImGui::PushID(int(r.id));
+        ImGui::SetCursorPos(ImVec2(30 * s, (y + (Z::kPitch - 28) * 0.5f) * s));
+        look::row();
+        if (look::ctx().rowSel) g_deskHelp = r.id;
+        ImGui::AlignTextToFramePadding();
+        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 22 * s);
+        ImGui::BeginDisabled(r.dim);
+        ImGui::TextUnformatted(r.label);
+        ImGui::SameLine(labelW);
+        look::ctx().widgetX = ImGui::GetCursorScreenPos().x;
+        ImGui::SetNextItemWidth(-flagW);
+        const pages::Value v = pages::value(r.id, st);
+        if (r.kind == pages::kList) {
+            const char* names[8]; int cur;
+            const int count = choices(r.id, st, names, &cur);
+            int c = cur;
+            if (r.id == pages::kScaling) {  // a value not in the list steps to its first or last entry
+                bool open = false;
+                const int d = look::optionFrame("##v", v.main, &open, v.rest);
+                if (open) {
+                    for (int k = 0; k < count; ++k) {
+                        if (ImGui::Selectable(names[k], k == cur) && k != cur) pick(r.id, st, k);
+                        if (k == cur) ImGui::SetItemDefaultFocus();
+                    }
+                    ImGui::EndCombo();
+                }
+                if (d) stepList(r.id, st, d);
+            } else if (look::option("##v", &c, names, count, v.main, v.rest) && c != cur) pick(r.id, st, c);
+        } else if (r.kind == pages::kToggle) {
+            bool on = !std::strcmp(v.main, "On");
+            bool flip = ImGui::Checkbox("##v", &on);
+            if (!r.dim) flip |= pad::padTick(on);
+            look::toggleLook(on);
+            if (flip) flipToggle(r.id);
+        } else {
+            const SliderSpec sp = sliderSpec(r.id, st);
+            int val = sp.value;
+            if (pad::typedSlider("##v", val, sp.lo, sp.hi, sp.step, sp.fmt, boxW, &typing)) setSlider(r.id, val);
+            look::sliderLook(val, sp.lo, sp.hi);
         }
-        if (st.generating && g_fpsRendered > 0)
-            note(kAccents[backendVendor(st.backend)].hi, "Generating %.1f\xC3\x97 \xC2\xB7 %.0f shown from %.0f rendered",
-                               g_fpsShown / g_fpsRendered, g_fpsShown, g_fpsRendered);
-        else note(look::kDim, st.available ? "Idle: turns on in gameplay, where the upscaler runs." : "");
-
-        if (st.backend == 0) {  // Reflex comes with Streamline: DLSS-G only
-            look::SeparatorText("NVIDIA Reflex");
-            static const char* reflexModes[] = { "Off", "On", "On + Boost" };
-            label("Low latency");
-            changed |= look::option("##reflex", &fs.reflex, reflexModes, 3);
-            if (fs.enable && fs.reflex == 0) note(look::kDim, "Frame generation needs Reflex, so it stays on while FG is enabled.");
-            else if (fs.reflex == 2) note(look::kDim, "Boost keeps GPU clocks up when the CPU is the limit. Slightly more power.");
-        } else if (st.backend == 2) {  // Xe Low Latency comes with XeSS frame generation
-            look::SeparatorText("Intel Xe Low Latency");
-            static const char* xellModes[] = { "Off", "On" };
-            int xell = fs.reflex > 0 ? 1 : 0;  // the ini's On + Boost (2) shows as On and is kept until changed here
-            label("Low latency");
-            if (look::option("##xell", &xell, xellModes, 2) && xell != (fs.reflex > 0 ? 1 : 0)) { fs.reflex = xell; changed = true; }
-            note(look::kDim, "XeSS frame generation needs Xe Low Latency, so it stays on while frame generation is enabled.");
-        } else if ((st.backend == 1 || di.active == 1) && !al2MenuShown(st.antilag, st.backend)) {  // the presenter paces frames itself whenever FSR or XeSS is in use
-            look::SeparatorText("Latency");
-            note(look::kDim, "The game waits for the GPU each frame instead of queueing frames ahead (FSR has no Reflex).");
-        } else if (di.active == 2 && !al2MenuShown(st.antilag, st.backend)) {
-            look::SeparatorText("Latency");
-            note(look::kDim, "The game waits for the GPU each frame instead of queueing frames ahead.");
-        }
-    }
-    ImGui::EndDisabled();
-    if (al2MenuShown(st.antilag, st.backend)) {  // AMD Radeon Anti-Lag 2: outside the block above, so it works without FG
-        look::SeparatorText("AMD Radeon Anti-Lag 2");
-        const bool ready = st.antilag == kAl2Ready;
-        ImGui::BeginDisabled(!ready);
-        static const char* al2Modes[] = { "Off", "On" };
-        int al2 = ready && fs.antilag ? 1 : 0;  // Off while unavailable; the stored setting is kept
-        label("Low latency");
-        if (look::option("##antilag", &al2, al2Modes, 2) && ready && al2 != (fs.antilag ? 1 : 0)) { fs.antilag = al2; changed = true; }
+        if ((turned || opening || padOpened) && i == 0) look::focusItem(GImGui->NavCursorVisible || padOpened);  // the first row
         ImGui::EndDisabled();
-        // the presenter paces frames itself whenever FSR or XeSS is in use; then Anti-Lag 2 comes on top of that
-        const bool paces = st.backend == 1 || di.active == 1 || di.active == 2;
-        static const char* const kNoDriver = "Not available: Anti-Lag 2 needs an AMD Radeon RX 5000 series card or newer and "
-                                             "AMD Software: Adrenalin Edition 24.7.1 or newer.";
-        static const char* const kLinux = "Not available on Linux: Anti-Lag 2 needs AMD's Windows driver.";
-        static const char* const kOff = "Off: the game waits for the GPU each frame instead of queueing frames ahead.";
-        static const char* const kOffNative = "Off: frames can queue ahead of the GPU, as without the mod.";
-        static const char* const kOn = "On: AMD's driver also holds back the game's next frame until just before the GPU needs it, for lower input lag.";
-        static const char* const kOnNative = "On: AMD's driver holds back the game's next frame until just before the GPU needs it, for lower input lag.";
-        // the note keeps the height of the longest one, so the menu does not change size between states
-        const float wrapW = ImGui::GetContentRegionAvail().x - 22 * s, gap = ImGui::GetStyle().ItemSpacing.y;
-        float slotH = 0;
-        ImGui::PushFont(g_small);
-        for (const char* t : { kNoDriver, kLinux, kOff, kOffNative, kOn, kOnNative })
-            slotH = std::max(slotH, ImGui::CalcTextSize(t, nullptr, false, wrapW).y);
-        ImGui::PopFont();
-        const float y0 = ImGui::GetCursorPosY();
-        if (st.antilag == kAl2Wine) note(look::kDim, "%s", kLinux);
-        else if (!ready) note(kAmber, "%s", kNoDriver);
-        else if (al2) note(look::kDim, "%s", paces ? kOn : kOnNative);
-        else note(look::kDim, "%s", paces ? kOff : kOffNative);
-        if (ImGui::GetCursorPosY() < y0 + slotH + gap) { ImGui::SetCursorPosY(y0 + slotH); ImGui::Dummy(ImVec2(0, 0)); }
-        testedNote("Untested on Radeon cards so far. If the game stutters or crashes with it on, turn it off and send ffxv_dlss.log.");
-    }
-    {
-        // it applies through Reflex when Streamline runs, else through the presenter's own pacing (FSR or XeSS, or the
-        // game's VSync on Windows), so it stays usable without FG
-        ImGui::BeginDisabled(!st.available && st.backend < 0 && di.active != 1 && di.active != 2 && !st.vsyncPaced);
-        char autoName[32]; snprintf(autoName, sizeof autoName, "Auto (%s)", syncName());
-        const char* capModes[] = { "Off", autoName, "Custom" };
-        int capMode = fs.limit < 0 ? 1 : fs.limit == 0 ? 0 : 2;
-        label("Frame cap");
-        if (look::option("##capmode", &capMode, capModes, 3)) { fs.limit = capMode == 0 ? 0 : capMode == 1 ? -1 : std::max(st.autoCap, 60); changed = true; }
-        if (capMode == 2) {
-            label("Cap");
-            changed |= pad::typedSlider("##limit", fs.limit, 30, 480, 5, "%d fps", boxW, &typing);
-            look::sliderLook(fs.limit, 30, 480);
-        }
-        else if (capMode == 1)
-            note(look::kDim, "Output capped at %d fps, just under the display's refresh, so %s stays engaged. "
-                                "Pair it with V-Sync on in the driver's control panel.", st.autoCap, syncName());
-        ImGui::EndDisabled();
+        const pages::Help h = pages::help(r.id, st);
+        if (h.flag != pages::kNoFlag)
+            look::diamond(dl, ImVec2(x0 + cw - flagW * 0.5f, win->Pos.y + (y + Z::kPitch * 0.5f) * s), 4 * s, h.flag == pages::kWarnFlag ? kAmber : look::kGo, 0);
+        ImGui::PopID();
+        y += Z::kPitch;
     }
     g_typing = typing;  // after the last box
-    if (changed) {
-        fgApply(fs);
-        iniSet(L"fg", L"enable", fs.enable); iniSet(L"fg", L"frames", fs.frames); iniSet(L"fg", L"target", fs.target); iniSet(L"fg", L"limit", fs.limit);
-        iniSet(L"fg", L"reflex", fs.reflex); iniSet(L"fg", L"antilag", fs.antilag);
-    }
 
-    look::SeparatorText("HUD");
-    label("Sharper HUD");
-    bool hudSharp = uiSharp();
-    bool sharpFlip = ImGui::Checkbox("##sharp", &hudSharp);
-    sharpFlip |= pad::padTick(hudSharp);
-    look::toggleLook(hudSharp);
-    if (sharpFlip) { uiSetSharp(hudSharp); iniSet(L"ui", L"sharp", hudSharp); }
-    note(look::kDim, "Crisper HUD text, icons and title screen. Costs a little frame rate at 4K.");
+    // ---- the help box: the selected row's, or the layouts' while the button is selected
+    const pages::Id helpId = buttonSel ? pages::kLayout : g_deskHelp;
+    const float helpY = win->Pos.y + Z::kHelpRule * s;
+    dl->AddRectFilled(ImVec2(x0, helpY), ImVec2(x0 + cw, helpY + s), look::col(look::rgba(205, 215, 228, .12f)));
+    drawHelp(dl, g_small, 13 * s, ImVec2(x0 + 22 * s, win->Pos.y + Z::kHelpTop * s), pages::kDeskFit.helpW * s, Z::kHelpStep * s, helpId, pages::help(helpId, st));
+    // ---- the status line
+    drawStatus(dl, g_small, pages::kDeskFit.statusPx * s, ImVec2(x0 + 22 * s, win->Pos.y + Z::kStatusTop * s), pages::status(st));
 
-    look::SeparatorText("Overlay");
-    label("FPS counter");
-    bool counterFlip = ImGui::Checkbox("##counter", &g_counter);
-    counterFlip |= pad::padTick(g_counter);
-    look::toggleLook(g_counter);
-    if (counterFlip) iniSet(L"overlay", L"enable", g_counter);
-    static const char* corners[] = { "Top left", "Top right", "Bottom left", "Bottom right" };
-    label("Position");
-    if (look::option("##corner", &g_corner, corners, 4)) iniSet(L"overlay", L"corner", g_corner);
-    {  // every machine: a handheld the mod does not recognise turns Portable mode on here; the layout changes at once
-        label("Portable mode");
-        bool on = g_swap.shown(g_deckOpen);
-        if (look::portable("##portable", on, g_deck26 != nullptr)) { g_layout = on ? 1 : 2; iniSet(L"overlay", L"layout", g_layout); g_swap.flip(on, ImGui::GetTime(), g_deckOpen); }
-        look::takeFocus(g_focusPortable, g_padUsed);
-    }
-    note(look::kDim, "Bigger text, pages and touch controls for handhelds. Switches now.");
-
-    // the footer: a faint line, the key hints, then the save line and the trademarks
-    ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 8 * s);
-    const ImVec2 foot = ImGui::GetCursorScreenPos();
-    win->DrawList->AddRectFilled(foot, ImVec2(foot.x + ImGui::GetContentRegionAvail().x, foot.y + s), look::col(look::rgba(205, 215, 228, .12f)));
-    ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 10 * s);
+    // ---- footer: a faint line, the key hints with the version right, then the trademarks
+    dl->AddRectFilled(ImVec2(x0, win->Pos.y + Z::kFootRule * s), ImVec2(x0 + cw, win->Pos.y + (Z::kFootRule + 1) * s), look::col(look::rgba(205, 215, 228, .12f)));
+    ImGui::SetCursorScreenPos(ImVec2(x0, win->Pos.y + Z::kHintsTop * s));
     const bool popup = ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup);
     g_padBusy = popup || ImGui::IsAnyItemActive();  // B backs out of the list or slider instead of closing the menu
-    if (g_padUsed) pad::drawHints(popup, g_padBusy, g_scale);  // in the footer line's own height: nothing moves
-    else {  // the keyboard's keys, in the same height
+    ImGui::PushClipRect(ImVec2(x0, wa.y), ImVec2(x0 + cw - 110 * s, wb.y), true);  // the hints stop short of the version
+    if (g_padUsed) pad::drawHints(popup, g_padBusy, g_scale);  // in the footer line's own height
+    else {
         const float h = ImGui::GetTextLineHeight();
         const ImVec2 k = ImGui::GetCursorScreenPos();
-        ImGui::Dummy(ImVec2(ImGui::GetContentRegionAvail().x, h));
-        float x = look::keyHint(win->DrawList, k.x, k.y, h, "\xE2\x86\x91\xE2\x86\x93", "Select") + 18 * s;
-        x = look::keyHint(win->DrawList, x, k.y, h, "\xE2\x86\x90\xE2\x86\x92", "Change") + 18 * s;
-        look::keyHint(win->DrawList, x, k.y, h, "Ins", "Close");
+        float x = look::keyHint(dl, k.x, k.y, h, "\xE2\x86\x91\xE2\x86\x93", "Select") + 18 * s;
+        x = look::keyHint(dl, x, k.y, h, "\xE2\x86\x90\xE2\x86\x92", "Change") + 18 * s;
+        look::keyHint(dl, x, k.y, h, "Ins", "Close");
     }
+    ImGui::PopClipRect();
+    {
+        const char* ver = "Lumenveil " LUMENVEIL_VERSION;
+        const float vw = g_small->CalcTextSizeA(g_small->FontSize, FLT_MAX, 0, ver).x, h = ImGui::GetTextLineHeight();
+        dl->AddText(g_small, g_small->FontSize, ImVec2(x0 + cw - vw, win->Pos.y + Z::kHintsTop * s + (h - g_small->FontSize) * 0.5f), look::col(look::kDim), ver);
+    }
+    ImGui::SetCursorScreenPos(ImVec2(x0, win->Pos.y + Z::kFineTop * s));
     ImGui::PushFont(g_small);
     ImGui::PushStyleColor(ImGuiCol_Text, look::kDim);
-    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(10 * s, 4 * s));
-    ImGui::TextUnformatted("Changes apply and save immediately.");
-    {  // the release number at the right end of the same line, drawn over it: nothing moves
-        const char* ver = "Lumenveil " LUMENVEIL_VERSION;
-        const ImVec2 r = ImGui::GetItemRectMin();
-        const float right = win->Pos.x + win->Size.x - win->WindowPadding.x - (win->ScrollbarY ? win->ScrollbarSizes.x : 0);
-        win->DrawList->AddText(ImVec2(right - ImGui::CalcTextSize(ver).x, r.y), ImGui::GetColorU32(ImGuiCol_Text), ver);
-    }
-    ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 6 * s);  // a little air above the trademark lines
+    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + cw);
     look::fineText("Uses NVIDIA DLSS, NVIDIA Reflex and NVIDIA Streamline, AMD FSR and Intel XeSS. NVIDIA, DLSS and "
-                   "Reflex are trademarks of NVIDIA Corporation, FSR of AMD and XeSS of Intel.", 11);  // smaller than the notes
-    ImGui::PopStyleVar();
+                   "Reflex are trademarks of NVIDIA Corporation, FSR of AMD and XeSS of Intel.", 11);  // smaller than the help
+    ImGui::PopTextWrapPos();
     ImGui::PopStyleColor();
     ImGui::PopFont();
-    ImGui::PopTextWrapPos();
     ImGui::PopStyleVar();  // the lists' padding
     ImGui::PushClipRect(wa, wb, false);
-    look::brackets(win->DrawList, wa, wb, look::kMenu);
+    look::brackets(dl, wa, wb, look::kMenu);
     ImGui::PopClipRect();
     ImGui::End();
 }
 
-// The Steam Deck layout (menu_deck.h): three pages switched with L1 / R1 or the tabs, one setting per row, saved through
-// the same setters and keys as drawMenu. What the Deck's AMD graphics cannot run is left out: DLSS and its model, DLSS
-// Frame Generation, Reflex, and Anti-Lag 2 (AMD's Windows driver only).
+// The Portable layout (menu_deck.h): the same three pages, rows, help box and status line as the desktop menu, in its
+// own bigger sizes, moved by the controller's focus and touch; saved through the same setters and keys as drawMenu.
 void drawDeckMenu() {
-    auto missing = [](const wchar_t* f) { return GetFileAttributesW(path(f).c_str()) == INVALID_FILE_ATTRIBUTES; };
-    const bool nvidiaGpu = g_vendorId == 0x10DE, intelGpu = g_vendorId == 0x8086;
     deck::Look L = deck::Look::at(float(g_w), float(g_h), g_deck26, g_deck24, g_deck19);
     deck::Nav& nav = g_deckNav;
     deck::Typing& typing = g_deckTyping;
     g_padOpened = false;  // the focus is the layout's own
     look::ctx().bob = look::bobX(ImGui::GetTime());  // the glove's sway, once a frame
-    // the controller: up / down move the focus, left / right change the value (repeating only on a slider), A, L1 / R1
-    // change page; B leaves a number box being typed in (pollToggle closes the menu on B otherwise)
+    const pages::State st = fillState();
+    pages::Row rows[pages::kMaxRows]; int sub;
+    int n = pages::rows(nav.page, st, rows, &sub);
+    // the controller: up / down move the focus (up from the first row to the layout button), left / right change the
+    // value (repeating only on a slider), A, L1 / R1 change page; B leaves a number box being typed in (pollToggle closes
+    // the menu on B otherwise)
     const uint16_t edges = g_padView.edges;
     if (typing.id && (edges & pad::kB)) deck::leaveTyping(typing);
     if (!typing.id) {
         if (edges & pad::kL1) nav.turn(-1);
         if (edges & pad::kR1) nav.turn(1);
-        if (ImGui::IsKeyPressed(ImGuiKey_GamepadDpadUp)) nav.move(deck::kRows[nav.page], -1);
-        if (ImGui::IsKeyPressed(ImGuiKey_GamepadDpadDown)) nav.move(deck::kRows[nav.page], 1);
+        if (edges & (pad::kL1 | pad::kR1)) n = pages::rows(nav.page, st, rows, &sub);
+        if (ImGui::IsKeyPressed(ImGuiKey_GamepadDpadUp)) nav.move(n, -1);
+        if (ImGui::IsKeyPressed(ImGuiKey_GamepadDpadDown)) nav.move(n, 1);
     }
+    if (nav.focus[nav.page] >= n) nav.focus[nav.page] = n - 1;  // a row that went away
     const int lrOnce = typing.id ? 0 : ImGui::IsKeyPressed(ImGuiKey_GamepadDpadLeft, false) ? -1
                      : ImGui::IsKeyPressed(ImGuiKey_GamepadDpadRight, false) ? 1 : 0;
     const int lrRepeat = typing.id ? 0 : pad::padLeftRight();
     const bool a = !typing.id && (edges & pad::kA);
-    int row = 0;
-    auto in = [&](bool dim, bool slider = false) {
-        deck::RowIn r;
-        r.focused = row == nav.focus[nav.page];
-        r.dim = dim;
-        if (r.focused && !dim) { r.lr = slider ? lrRepeat : lrOnce; r.a = a; }
-        return r;
-    };
-    auto took = [&](const deck::RowOut& o) { if (o.press) nav.focus[nav.page] = row; ++row; return o.step; };
-    char line[192];
-
-    // what both pages show, worked out as drawMenu does
-    const DlssInfo di = dlssInfo();
-    const bool activeKnown = di.active >= 0 && di.active < kUpscalerCount;
-    const int autoUp = nvidiaGpu ? 0 : intelGpu && !missing(kUpscalers[2].file) ? 2 : 1;  // what Auto picks on this GPU
-    const int want = di.upscaler >= 0 && di.upscaler < kUpscalerCount ? di.upscaler : activeKnown ? di.active : autoUp;
-    const FgStatus st = fgStatus();
-    FgSettings fs = fgSettings();
-    FgPick& fp = fgPick();
-    const bool dlssg = !missing(L"ffxv_dlss\\streamline\\nvngx_dlssg.dll");
-    const bool fsrFiles = !missing(kUpscalers[1].file), fsrFgDll = !missing(L"ffxv_dlss\\fidelityfx\\amd_fidelityfx_framegeneration_dx12.dll");
-    const bool xessFgFiles = xessFgPresent();
-    auto resolve = [&](int b) { return fgPickBackend(b, g_vendorId, dlssg, xessFgFiles); };
-    const int running = st.backend >= 0 ? st.backend : resolve(fp.launchBackend), picked = resolve(fp.backend - 1);
-    const bool fsrOffAtLaunch = !st.available && !fp.launchEnable && !st.formatRefused
-                                && ((running == 1 && fsrFiles && fsrFgDll) || (running == 2 && xessFgFiles));
-    const char* here = g_isDeck ? "Deck" : "PC";
 
     deck::begin(L);
     if (g_logo || g_logo11)
         deck::logo(L, g_native ? (ImTextureID)(uintptr_t)g_logo11 : (ImTextureID)gpuAt(g_srvHeap, 2).ptr, g_logoW / g_logoH);
+    const int want = deck::layoutButton(L, true, nav.focus[nav.page] == deck::kButton, lrOnce, a);
+    if (want >= 0) switchLayout(want == 1);
     const int to = deck::tabs(L, nav.page, nullptr);
-    if (to != nav.page) { deck::leaveTyping(typing); nav.page = to; }
+    if (to != nav.page) { deck::leaveTyping(typing); nav.show(to); n = pages::rows(nav.page, st, rows, &sub); }
 
-    if (nav.page == 0) {
-        deck::section(L, "Upscaling");
-        static const int upscalers[] = { -1, 1, 2 };  // Auto, AMD FSR, Intel XeSS
-        char autoName[64];
-        snprintf(autoName, sizeof autoName, "Auto  (%s on this %s)", kUpscalers[autoUp].shortName, here);
-        const char* upName = di.upscaler >= 0 && di.upscaler < kUpscalerCount ? kUpscalers[di.upscaler].name : autoName;
-        if (const int s = took(deck::cycler(L, "##upscaler", "Upscaler", upName, in(false)))) {
-            const int u = deck::listStep(upscalers, 3, di.upscaler >= -1 && di.upscaler < kUpscalerCount ? di.upscaler : -1, s);
-            dlssSetUpscaler(u);
-            iniSet(L"dlss", L"upscaler", u);
-        }
-        if (want == 0 && !nvidiaGpu) deck::status(L, "DLSS needs an NVIDIA GeForce RTX card. The game uses its own anti-aliasing.", deck::kAmber);
-        else if (missing(kUpscalers[want].file)) deck::status(L, kUpscalers[want].missing, deck::kAmber);
-        else {
-            if (di.active == 1 && *di.fsrVersion) snprintf(line, sizeof line, "AMD FSR %s upscaling.", di.fsrVersion);
-            else if (di.active == 2 && *di.xessVersion)
-                snprintf(line, sizeof line, g_isDeck ? "Intel XeSS %s, running on the Deck's AMD graphics." : "Intel XeSS %s upscaling.", di.xessVersion);
-            else snprintf(line, sizeof line, "%s upscaling.", kUpscalers[want].name);
-            deck::status(L, line, deck::kDim);
-        }
-        if (took(deck::toggle(L, "##upscale", "Enabled", dlssEnabled(), in(false)))) dlssToggle();
-
-        ScaleState& ss = scaleState();
-        const int upPct = ultraPerformancePct(want == 2);  // 0 with XeSS: Ultra Performance left out (xess_rules.h)
-        const int pcts[] = { 100, 67, 58, 50, upPct ? upPct : 33 };
-        static const char* const modeNames[] = { "Native AA", "Quality", "Balanced", "Performance", "Ultra Performance" };
-        const char* mode = ss.ratio == 33 || ss.ratio == 34 ? modeNames[4] : "Custom";
-        for (int i = 0; i < 5; ++i) if (pcts[i] == ss.ratio) mode = modeNames[i];
-        char modeText[64] = "GraphicsConfig.ini not found";
-        if (ss.ratio) snprintf(modeText, sizeof modeText, "%s  \xC2\xB7  %d%%", mode, ss.ratio);
-        if (const int s = took(deck::cycler(L, "##scale", "Scaling mode", modeText, in(!ss.ratio)))) {
-            const int n = deck::listStep(pcts, upPct ? 5 : 4, ss.ratio, s);
-            if (n != ss.ratio) {
-                ss.ratio = n;
-                WritePrivateProfileStringW(L"BasicSettings", L"RenderingResolutionRatio", std::to_wstring(n).c_str(), ss.cfg.c_str());
+    L.y = deck::kBodyTop;
+    const int page = nav.page;
+    {
+        for (int i = 0; i < n; ++i) {
+            const pages::Row& r = rows[i];
+            if (i == sub) deck::subHeading(L, "Latency");
+            const float rowY = L.y;
+            deck::RowIn in;
+            in.focused = i == nav.focus[page];
+            in.dim = r.dim;
+            if (in.focused && !r.dim) { in.lr = r.kind == pages::kSlider ? lrRepeat : lrOnce; in.a = a; }
+            const pages::Value v = pages::value(r.id, st);
+            char id[16]; snprintf(id, sizeof id, "##r%d", int(r.id));
+            deck::RowOut o;
+            if (r.kind == pages::kList) {
+                o = deck::cycler(L, id, r.label, v.main, in, v.rest);
+                if (o.step) stepList(r.id, st, o.step);
+            } else if (r.kind == pages::kToggle) {
+                o = deck::toggle(L, id, r.label, !std::strcmp(v.main, "On"), in);
+                if (o.step) flipToggle(r.id);
+            } else {
+                const SliderSpec sp = sliderSpec(r.id, st);
+                int val = sp.value;
+                const bool dim = r.dim || (r.id == pages::kCap && st.limit <= 0);
+                in.dim = dim;
+                if (dim) in.lr = 0, in.a = false;
+                if (deck::slider(L, id, r.label, val, sp.lo, sp.hi, std::max(sp.step, 5), r.id == pages::kTarget || r.id == pages::kCap ? " fps" : "%", in, typing, &o))
+                    setSlider(r.id, val);
             }
+            if (o.press || o.focus) nav.focus[page] = i;  // a tap on a dimmed row focuses it: its help says why
+            const pages::Help h = pages::help(r.id, st);
+            if (h.flag != pages::kNoFlag) deck::flag(L, rowY, h.flag == pages::kWarnFlag ? deck::kAmber : deck::kGreen);
         }
-        const int live = di.outW ? int(std::lround(100.0 * di.inH / di.outH)) : 0;
-        if (want == 2 && ((ss.ratio && ss.ratio < xessLowestPct()) || xessInputBelowRange())) {
-            snprintf(line, sizeof line, "Intel XeSS needs a scaling mode of %d%% or more, then a restart.", xessLowestPct());
-            deck::status(L, line, deck::kAmber);
-        } else if (ss.ratio && live && std::abs(live - ss.ratio) > 1) deck::status(L, "Restart the game to apply the new scaling mode.", deck::kGreen);
-        else if (live) {
-            snprintf(line, sizeof line, "Now rendering %u\xC3\x97%u \xE2\x86\x92 %u\xC3\x97%u (%d%%).", di.inW, di.inH, di.outW, di.outH, live);
-            deck::status(L, line, deck::kDim);
-        } else deck::status(L, "Changes apply the next time the game starts.", deck::kDim);
-
-        int sharp = di.sharpness;
-        deck::RowOut o;
-        if (deck::slider(L, "##sharp", "Sharpening", sharp, 0, 100, 5, "%", in(false, true), typing, &o)) {
-            dlssSetSharpness(sharp);
-            iniSet(L"dlss", L"sharpness", sharp);
-        }
-        took(o);
-    } else if (nav.page == 1) {
-        deck::section(L, "Frame generation");
-        static const int backends[] = { 1, 2 };  // AMD FSR, Intel XeSS
-        char autoName[64];
-        snprintf(autoName, sizeof autoName, "Auto  (%s on this %s)", kUpscalers[resolve(-1)].shortName, here);
-        // the short names (AMD FSR, Intel XeSS): the upscalers' table is by the same id
-        const char* bName = fp.backend >= 1 && fp.backend <= kBackendCount ? kUpscalers[fp.backend - 1].name : autoName;
-        if (const int s = took(deck::cycler(L, "##fgbackend", "Backend", bName, in(false)))) {
-            fp.backend = deck::listStep(backends, 2, fp.backend - 1, s) + 1;
-            iniSet(L"fg", L"backend", fp.backend - 1);
-        }
-        const char* note = nullptr;
-        ImVec4 noteCol = deck::kDim;
-        if ((fp.backend - 1 != fp.launchBackend && picked != running) || (fsrOffAtLaunch && fs.enable)) {
-            note = "Restart the game to switch frame generation."; noteCol = deck::kGreen;
-        } else if (!st.available) {
-            if (running == 0) { note = dlssg ? "Not available: DLSS Frame Generation needs an RTX 40 or 50 series card." : "nvngx_dlssg.dll not found."; noteCol = dlssg ? deck::kDim : deck::kAmber; }
-            else if (running == 2) {
-                if (!xessFgFiles) { note = "Intel's XeSS frame generation needs libxess.dll, libxess_fg.dll and libxell.dll in ffxv_dlss\\xess."; noteCol = deck::kAmber; }
-                else if (st.formatRefused) note = "Not available: Intel XeSS frame generation does not take the game's HDR output format.";
-                else if (fp.launchEnable) note = "Not available: Intel XeSS frame generation did not start. ffxv_dlss.log has the reason.";
-            } else if (!fsrFiles) { note = "AMD's FSR files not found (see the Upscaling page)."; noteCol = deck::kAmber; }
-            else if (!fsrFgDll) { note = "amd_fidelityfx_framegeneration_dx12.dll not found in ffxv_dlss\\fidelityfx."; noteCol = deck::kAmber; }
-            else if (fp.launchEnable) note = "Not available: AMD FSR frame generation did not start. ffxv_dlss.log has the reason.";
-        }
-        if (!note) {
-            if (st.available && st.backend == 1 && *fsrFgVersion()) snprintf(line, sizeof line, "AMD FSR frame generation %s.", fsrFgVersion());
-            else if (st.available && st.backend == 2 && *xessFgVersion())
-                snprintf(line, sizeof line, "Intel XeSS frame generation %s, with Xe Low Latency.", xessFgVersion());
-            else snprintf(line, sizeof line, "%s", picked == 2 ? "Intel XeSS frame generation, with Xe Low Latency."
-                                                               : "AMD FSR frame generation. The game waits for the GPU each frame.");
-            note = line;
-        }
-        deck::status(L, note, noteCol);
-        const bool fgDim = !st.available && !fsrOffAtLaunch;
-        bool changed = false;
-        if (took(deck::toggle(L, "##fg", "Enabled", fs.enable != 0, in(fgDim)))) { fs.enable = fs.enable ? 0 : 1; changed = true; }
-        took(deck::cycler(L, "##mode", "Mode", "2\xC3\x97", in(fgDim)));  // FSR and XeSS generate 2x: nothing to change
-        if (st.generating && g_fpsRendered > 0) {
-            snprintf(line, sizeof line, "Generating %.1f\xC3\x97 \xC2\xB7 %.0f shown from %.0f rendered", g_fpsShown / g_fpsRendered, g_fpsShown, g_fpsRendered);
-            deck::status(L, line, deck::kGreen);
-        } else deck::status(L, !fs.enable ? "Frame generation is off." : st.available ? "Idle: turns on in gameplay, where the upscaler runs." : "", deck::kDim);
-
-        // the mod's own frame cap, usable as in drawMenu
-        const bool capDim = !st.available && st.backend < 0 && di.active != 1 && di.active != 2 && !st.vsyncPaced;
-        char autoCap[32];
-        snprintf(autoCap, sizeof autoCap, "Auto (%s)", syncName());
-        const char* capModes[] = { "Off", autoCap, "Custom" };
-        int capMode = fs.limit < 0 ? 1 : fs.limit == 0 ? 0 : 2;
-        if (const int s = took(deck::cycler(L, "##capmode", "Frame cap", capModes[capMode], in(capDim)))) {
-            capMode = deck::wrapStep(capMode, 3, s);
-            fs.limit = capMode == 0 ? 0 : capMode == 1 ? -1 : std::max(st.autoCap, 60);
-            changed = true;
-        }
-        int cap = capMode == 2 ? fs.limit : std::max(st.autoCap, 60);
-        deck::RowOut o;
-        if (deck::slider(L, "##limit", "Cap", cap, 30, 480, 5, " fps", in(capDim || capMode != 2, true), typing, &o) && capMode == 2) {
-            fs.limit = cap;
-            changed = true;
-        }
-        took(o);
-        if (changed) {  // as drawMenu saves them; this page changes only these two
-            fgApply(fs);
-            iniSet(L"fg", L"enable", fs.enable); iniSet(L"fg", L"limit", fs.limit);
-        }
-    } else {
-        deck::section(L, "Overlay");
-        if (took(deck::toggle(L, "##counter", "FPS counter", g_counter, in(false)))) { g_counter = !g_counter; iniSet(L"overlay", L"enable", g_counter); }
-        static const char* const corners[] = { "Top left", "Top right", "Bottom left", "Bottom right" };
-        if (const int s = took(deck::cycler(L, "##corner", "Position", corners[g_corner], in(!g_counter)))) {
-            g_corner = deck::wrapStep(g_corner, 4, s);
-            iniSet(L"overlay", L"corner", g_corner);
-        }
-        deck::section(L, "Layout");
-        bool on = g_swap.shown(g_deckOpen);
-        if (took(deck::portableRow(L, "##portable", "Portable mode", on, in(!g_deck26)))) {
-            on = !on;
-            g_layout = on ? 1 : 2; iniSet(L"overlay", L"layout", g_layout); g_swap.flip(on, ImGui::GetTime(), g_deckOpen);
-        }
-        deck::status(L, "Bigger text, pages and touch controls for handhelds. Switches now.", deck::kDim);
     }
-    deck::footer(L, "Lumenveil " LUMENVEIL_VERSION);
+    // the help box: the focused row's, or the layouts' on the button
+    const int focus = nav.focus[page];
+    const pages::Id helpId = focus == deck::kButton || n == 0 ? pages::kLayout : rows[std::clamp(focus, 0, n - 1)].id;
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->AddRectFilled(L.p(30, deck::kHelpRule), L.p(deck::kPanelW - 30, deck::kHelpRule + 1), deck::col(ImVec4(205 / 255.f, 215 / 255.f, 228 / 255.f, .12f)));
+    drawHelp(dl, L.caption, deck::kHelpPx * L.k, L.p(deck::kRowL + 48, deck::kHelpTop), pages::kDeckFit.helpW * L.k, deck::kHelpLine * L.k, helpId, pages::help(helpId, st));
+    drawStatus(dl, L.caption, pages::kDeckFit.statusPx * L.k, L.p(deck::kRowL + 48, deck::kStatusTop), pages::status(st));
+    deck::footer(L, "Lumenveil " LUMENVEIL_VERSION, typing.id != 0);
     deck::end(L);
     g_padBusy = g_typing = typing.id != 0;  // B and Esc leave the number box before they close the menu
 }
@@ -1678,9 +1544,8 @@ bool compose(IDXGISwapChain3* sc, UINT index, bool layer) {
     const bool front = g_open && GetForegroundWindow() == g_wnd;
     keys.feed(io, [front](int vk) { return front && (GetAsyncKeyState(vk) & 0x8000) != 0; });
     if (g_open) {
-        // a Portable mode flip lands here, before the controller is fed and the navigation flags are set, so the new
-        // layout has its own navigation from its first frame: the Deck layout on its Overlay page with Portable mode
-        // focused, the desktop menu with its switch focused
+        // a layout change lands here, before the controller is fed and the navigation flags are set, so the new layout
+        // has its own navigation from its first frame, with its layout button focused
         if (g_swap.due(ImGui::GetTime())) {
             g_deckOpen = g_deck26 && g_swap.want == 1;
             g_swap = {}; g_deckTyping = {};
@@ -1694,6 +1559,11 @@ bool compose(IDXGISwapChain3* sc, UINT index, bool layer) {
             pad::stickPast(g_padView.ly, 1) || pad::stickPast(g_padView.ly, -1))
             g_padUsed = true;
     } else if (g_padRelease) { pad::releasePad(io); g_padRelease = false; }
+    // the desktop menu's pages: a click on a tab, or L1 / R1, not while a box is typed in or a list is open
+    if (g_open && !g_deckOpen && !g_typing && !g_padBusy) {
+        const int turn = (g_padView.edges & pad::kR1) ? 1 : (g_padView.edges & pad::kL1) ? -1 : 0;
+        if (turn) g_pageTurn = turn;
+    }
     // the Steam Deck layout moves its own focus, so ImGui's must not move too; the desktop menu gets it back
     if (g_open && g_deckOpen) io.ConfigFlags &= ~ImGuiConfigFlags_NavEnableGamepad;
     else io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;

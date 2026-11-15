@@ -11,10 +11,10 @@
 here=$(cd "$(dirname "$0")" && pwd)
 src=$(cd "${1:-$here/../src}" && pwd) || exit 1
 
-python3 -I - "$src/main.cpp" "$src/menu.cpp" <<'EOF' || exit 1
+python3 -I - "$src/main.cpp" "$src/menu.cpp" "$src/menu_pages.h" <<'EOF' || exit 1
 import re, sys
 read = lambda p: open(p, encoding='utf-8', errors='replace').read().replace('\r\n', '\n')
-sources = {'main': read(sys.argv[1]), 'menu': read(sys.argv[2])}
+sources = {'main': read(sys.argv[1]), 'menu': read(sys.argv[2]) + '\n' + read(sys.argv[3])}  # rows and help: the page model
 
 def body(src, name):
     m = re.search(r'^\S[^\n;]*?\b' + name + r'\([^\n]*\{\n(.*?)^\}', src, re.M | re.S)
@@ -25,20 +25,17 @@ CAPTION = 'Crisper HUD text, icons and title screen. Costs a little frame rate a
 def problems(s):
     out = []
     main, menu = s['main'], s['menu']
-    # menu: a HUD section above Overlay, the checkbox with its pad tick, the caption, the switch and the ini key
-    hud, overlay = menu.find('SeparatorText("HUD")'), menu.find('SeparatorText("Overlay")')
-    sec = menu[hud:overlay] if 0 <= hud < overlay else ''
-    if not sec:
-        out.append('the menu has no HUD section above Overlay')
-    else:
-        if 'label("Sharper HUD")' not in sec or not re.search(r'ImGui::Checkbox\("##sharp", &(\w+)\)', sec):
-            out.append('the HUD section has no Sharper HUD checkbox')
-        if 'pad::padTick(' not in sec:
-            out.append('the Sharper HUD checkbox cannot be ticked with a controller')
-        if CAPTION not in sec:
-            out.append('the Sharper HUD caption is missing or reworded')
-        if not re.search(r'uiSetSharp\(\w+\);', sec) or not re.search(r'iniSet\(L"ui", L"sharp", \w+\)', sec):
-            out.append('ticking Sharper HUD does not switch the replacements and save [ui] sharp')
+    # menu: a Sharper HUD tick box on the Overlay page, ticked with a controller too, its caption in the help box, the
+    # switch and the ini key
+    ov = re.search(r'\} else \{\n(\s*add\(kCounter, [^\n]*\n\s*add\(kPosition, [^\n]*\n\s*add\(kHud, "Sharper HUD", kToggle, false\);)', menu)
+    if not ov:
+        out.append('the menu has no Sharper HUD tick box on the Overlay page')
+    if not re.search(r'bool flip = ImGui::Checkbox\("##v", &on\);\s*if \(!r\.dim\) flip \|= pad::padTick\(on\);', menu):
+        out.append('the Sharper HUD checkbox cannot be ticked with a controller')
+    if 'case kHud: add(kInk, 1, "%s", "' + CAPTION + '");' not in menu:
+        out.append('the Sharper HUD caption is missing or reworded')
+    if not re.search(r'case pages::kHud: \{ const bool on = !uiSharp\(\); uiSetSharp\(on\); iniSet\(L"ui", L"sharp", on\); break; \}', menu):
+        out.append('ticking Sharper HUD does not switch the replacements and save [ui] sharp')
     # main: starts from [ui] sharp, on by default, at hook setup; no trigger file or blind toggle left
     hd = body(main, 'hookDevice') or ''
     if not re.search(r'g_uiFix = GetPrivateProfileIntW\(L"ui", L"sharp", 1, ', hd):
@@ -94,8 +91,8 @@ def edit(which, old, new):
     return f
 
 mutants = [
-    ('the HUD section is renamed', edit('menu', 'SeparatorText("HUD")', 'SeparatorText("Display")')),
-    ('the checkbox has no pad tick', edit('menu', 'sharpFlip |= pad::padTick(', 'sharpFlip |= pad::padTock(')),
+    ('the HUD row leaves the Overlay page', edit('menu', '        add(kHud, "Sharper HUD", kToggle, false);', '')),
+    ('the checkbox has no pad tick', edit('menu', 'flip |= pad::padTick(', 'flip |= pad::padTock(')),
     ('the caption is reworded', edit('menu', 'Costs a little frame rate at 4K.', 'Costs a little frame rate.')),
     ('the checkbox does not save', edit('menu', 'iniSet(L"ui", L"sharp", ', 'iniSet(L"ui", L"sharpx", ')),
     ('the default is off', edit('main', 'L"ui", L"sharp", 1, ', 'L"ui", L"sharp", 0, ')),

@@ -64,7 +64,7 @@ def problems(p, m):
     if 'SetPrivateData(kFfxAntiLag2Data' not in present_: out.append('p12Present does not hand the context to FSR')
     # the menu saves its own key
     if 'iniSet(L"fg", L"antilag", fs.antilag);' not in code(m): out.append('the menu does not save [fg] antilag')
-    if not re.search(r'if \(al2MenuShown\(st\.antilag, st\.backend\)\)', code(m)): out.append('the menu does not show the section by al2MenuShown')
+    if not re.search(r's\.al2Shown = al2MenuShown\(st\.antilag, st\.backend\);', code(m)): out.append('the menu does not show the row by al2MenuShown')
     return out
 
 got = problems(present, menu)
@@ -84,7 +84,7 @@ broken = {
     'no end-of-frame mark': (present.replace('if (g_fsrFg && al2) AMD::AntiLag2DX12::MarkEndOfFrameRendering(&g_al2);', '', 1), menu),
     'mark without FSR': (present.replace('if (g_fsrFg && al2) AMD::AntiLag2DX12::MarkEndOfFrameRendering', 'if (al2) AMD::AntiLag2DX12::MarkEndOfFrameRendering', 1), menu),
     'FSR not told': (present.replace('g_sc->SetPrivateData(kFfxAntiLag2Data,', 'g_sc->GetDesc1(nullptr); (void)(kFfxAntiLag2Data,', 1), menu),
-    'menu shows it always': (present, menu.replace('if (al2MenuShown(st.antilag, st.backend))', 'if (true)', 1)),
+    'menu shows it always': (present, menu.replace('s.al2Shown = al2MenuShown(st.antilag, st.backend);', 's.al2Shown = true;', 1)),
     'XeSS not ruled out': (present.replace('al2Run(g_al2State, g_set.antilag, g_fg, g_xessSc)', 'al2Run(g_al2State, g_set.antilag, g_fg, false)', 1), menu),
     'update every frame': (present.replace('if (al2 || g_al2.m_enabled) {', 'if (true) {', 1), menu),
     'update before pacing': (present.replace(pb, pb.replace('fsrPace();', 'fsrPaceX();', 1).replace(

@@ -60,15 +60,17 @@ static void steps() {
     CHECK(listStep(ups, 3, 0, 1) == -1); CHECK(listStep(ups, 3, 0, -1) == 2);
     CHECK(listStep(ups, 3, -1, 1) == 1); CHECK(listStep(ups, 3, 2, 1) == -1); CHECK(listStep(ups, 3, -1, -1) == 2);
     CHECK(listStep(ups, 3, 1, 0) == 1);
-    // the focus: one row per press, stopping at both ends, remembered per page; pages wrap both ways
+    // the focus: one row per press, up from the first row to the layout button (-1) and no further, down to the last
+    // row; pages wrap both ways and every page change starts on the first row (2026-11-15-menu-cleanup AC3, AC7)
     Nav n;
-    n.move(4, -1); CHECK(n.focus[0] == 0);
+    n.move(4, -1); CHECK(n.focus[0] == kButton);
+    n.move(4, -1); CHECK(n.focus[0] == kButton);
     for (int i = 0; i < 9; ++i) n.move(4, 1);
     CHECK(n.focus[0] == 3);
     n.turn(1); CHECK(n.page == 1); CHECK(n.focus[1] == 0);
     n.move(5, 1); n.move(5, 1); CHECK(n.focus[1] == 2);
-    n.turn(1); CHECK(n.page == 2); n.turn(1); CHECK(n.page == 0); CHECK(n.focus[0] == 3);
-    n.turn(-1); CHECK(n.page == 2); n.turn(-1); CHECK(n.page == 1); CHECK(n.focus[1] == 2);
+    n.turn(1); CHECK(n.page == 2); n.turn(1); CHECK(n.page == 0); CHECK(n.focus[0] == 0);
+    n.turn(-1); CHECK(n.page == 2); n.turn(-1); CHECK(n.page == 1); CHECK(n.focus[1] == 0);
 }
 
 // ---- rows in a headless context --------------------------------------------------------------------------------------
@@ -86,7 +88,7 @@ struct Frame {
 static int g_slider = 50, g_page = 0;
 static Typing g_typing;
 
-// The longest page (Frame generation): a section, a list, a status line, a toggle, a list, a status line, a list and a
+// The Frame generation page's rows in their fixed slots: a list, a toggle, a list, the heading slot, a list and a
 // slider, with the longest values the menu shows.
 static Frame frame(bool dim = false, RowIn pad = {}, RowIn spad = {}) {  // pad: the Backend row's, spad: the slider's
     ImGuiIO& io = ImGui::GetIO();
@@ -97,21 +99,20 @@ static Frame frame(bool dim = false, RowIn pad = {}, RowIn spad = {}) {  // pad:
     Look& L = f.look;
     begin(L);
     f.tab = tabs(L, g_page, nullptr);
-    section(L, "Frame generation");
+    L.y = kBodyTop;
     auto row = [&](int i, RowOut o) { f.out[i] = o; f.rects[f.nRects++] = ImRect(ImGui::GetItemRectMin(), ImGui::GetItemRectMax()); ++f.rowsDrawn; };
     RowIn in = pad; in.dim = dim;
-    row(0, cycler(L, "##backend", "Backend", "Intel XeSS Frame Generation", in));
-    status(L, "Not available: Intel XeSS frame generation does not take the game's HDR output format. Turn HDR off.", kDim);
+    row(0, cycler(L, "##backend", "Backend", "Intel XeSS", in));
     row(1, toggle(L, "##fg", "Enabled", true, RowIn{}));
     row(2, cycler(L, "##mode", "Mode", "2\xC3\x97", RowIn{}));
-    status(L, "Generating 2.0\xC3\x97 \xC2\xB7 120 shown from 60 rendered", kGreen);
-    row(3, cycler(L, "##cap", "Frame cap", "Auto (Adaptive Sync)", RowIn{}));
+    subHeading(L, "Latency");
+    row(3, cycler(L, "##cap", "Frame cap", "Auto", RowIn{}, "Adaptive Sync"));
     RowIn sl = spad; sl.dim = dim;
     RowOut so;
     f.sliderChanged = slider(L, "##limit", "Cap", g_slider, 30, 480, 5, " fps", sl, g_typing, &so);
     row(4, so);
     f.bodyEnd = L.y;
-    footer(L, "Lumenveil 0.0.0");
+    footer(L, "Lumenveil 0.0.0", false);
     end(L);
     ImGui::Render();
     return f;
@@ -139,11 +140,11 @@ static void layout() {
         for (int i = 0; i < f.nRects; ++i) {
             const ImRect& r = f.rects[i];
             CHECK(r.Min.x >= o.x && r.Max.x <= o.x + 760 * k + 0.01f);
-            CHECK(r.Min.y >= o.y + kTabBottom * k && r.Max.y <= o.y + kFootTop * k + 0.01f);
-            CHECK(near(r.GetHeight(), 66 * k)); CHECK(near(r.GetWidth(), 720 * k));
+            CHECK(r.Min.y >= o.y + kTabBottom * k && r.Max.y <= o.y + kHelpRule * k + 0.01f);
+            CHECK(near(r.GetHeight(), 52 * k)); CHECK(near(r.GetWidth(), 720 * k));
         }
-        CHECK(f.bodyEnd <= kFootTop);
-        CHECK(f.bodyEnd > kBodyTop + 5 * 66);  // the five rows were laid out
+        CHECK(f.bodyEnd <= kBodyEnd);
+        CHECK(near(f.bodyEnd, kBodyTop + kSubH + 5 * 54));  // the five rows and the heading slot, at a 54 px pitch
         ImGuiWindow* w = ImGui::FindWindowByName("##deck");
         CHECK(w && w->ScrollMax.y == 0 && std::fabs(w->Size.y - 768 * k) < 1 && std::fabs(w->Size.x - 760 * k) < 1);
     }
@@ -176,12 +177,12 @@ static void pointer() {
     CHECK(!g.out[0].press);
     // the slider: a press on the track sets the value there, a drag follows, clamped at the ends
     const ImRect cap = f.rects[4];
-    const float cy = mid(cap).y, left = cap.Min.x + 290 * k, right = cap.Min.x + 590 * k;  // the track: 300 wide
+    const float cy = mid(cap).y, left = cap.Min.x + 290 * k, right = cap.Min.x + 584 * k;  // the track: 294 wide
     g_slider = 50;
     mouse(left, cy, false); frame();
-    mouse(left + 150 * k, cy, true); g = frame();
+    mouse(left + 147 * k, cy, true); g = frame();
     CHECK(g.out[4].press); CHECK(g.sliderChanged); CHECK(g_slider == 255);  // the middle of 30..480
-    mouse(left + 300 * k, cy, true); frame();
+    mouse(left + 294 * k, cy, true); frame();
     CHECK(g_slider == 480);
     mouse(left - 80 * k, cy, true); frame();
     CHECK(g_slider == 30);

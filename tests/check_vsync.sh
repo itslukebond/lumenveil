@@ -51,7 +51,7 @@ if not line('if (ownPace(g_fg, proxyFg(), up, g_wantSync)) fsrPace();'): out.app
 if not re.search(r'g_wantSync = vsyncByCap\(.*?setReflex\(\).*?g_sc->Present\(interval,', present, re.S): out.append('p12Present: Reflex cap not refreshed when VSync changes')
 # the menu's cap row is usable whenever our pacing stands in for VSync (finding 4)
 if not re.search(r's\.vsyncPaced\s*=\s*g_wantSync;', status): out.append('fgStatus: vsyncPaced not reported')
-if not re.search(r'BeginDisabled\(!st\.available && st\.backend < 0 && di\.active != 1 && di\.active != 2 && !st\.vsyncPaced\)', menu): out.append('menu.cpp: Frame cap row not enabled for VSync pacing')
+if not re.search(r's\.capUsable = st\.available \|\| st\.backend >= 0 \|\| di\.active == 1 \|\| di\.active == 2 \|\| st\.vsyncPaced;', menu): out.append('menu.cpp: Frame cap row not enabled for VSync pacing')
 # the watchdog (finding 3, rare R1)
 m = re.search(r'if \(!g_watchdog\) \{\s*g_watchdog = true;\s*if \(HANDLE th = CreateThread\(nullptr, 0, stallWatchdog', init)
 if not m: out.append('p12Init: stall watchdog not started exactly once')
