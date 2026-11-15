@@ -74,6 +74,15 @@ HRESULT p12Present(UINT syncInterval, UINT flags);
 bool p12Busy();                          // creating our swapchain: DXGI hooks pass straight through
 void p12WaitInputsFree(ID3D11DeviceContext* ctx);  // before overwriting frame-generation inputs
 void p12FirstDraw();                     // Reflex: simulation end / render submit start
+// Native presentation (present_mode.h): no frame generation backend started, the game keeps its own swap chain
+bool p12Native();                        // decided in the first p12Init
+bool p12Device();                        // a D3D12 device exists (the presenter's, or natively FSR's and XeSS's)
+bool p12NativeTearing();                 // natively on Windows: create and resize the game's swap chain with the tearing flag
+bool p12IsNative(IDXGISwapChain* sc);    // the game's current swap chain, natively
+void p12NativeAttach(IDXGISwapChain* sc, bool tearing);
+UINT p12NativeBefore(IDXGISwapChain* sc, UINT syncInterval, UINT flags);  // menu frame; returns the flags to present with
+void p12NativeTearingRefused();          // a Present with the tearing flag failed: never add it again
+void p12NativeAfter(IDXGISwapChain* sc, UINT flags);
 // What up12.cpp needs of the presenter: its D3D12 device and queue, the game's D3D11 device/context and the two shared
 // fences (each signalled from one API only, used from the game's render thread only).
 struct ID3D12Device; struct ID3D12CommandQueue; struct ID3D12Fence; struct ID3D12Resource; struct ID3D11Device5;
@@ -159,5 +168,12 @@ bool menuTargets(IDXGISwapChain3* sc);     // after the presenter's back buffers
 void menuReleaseTargets();                 // before they are released (queue already idle)
 void menuFrame(IDXGISwapChain3* sc, UINT backBuffer);  // record + submit, before Present
 void menuCount(unsigned shown);            // after Present: frames actually shown for this rendered one
+// natively the same menu and counter, drawn on the game's D3D11 device into its own back buffer
+void menuInitNative(ID3D11Device* dev, HWND wnd, UINT height);  // once per launch
+void menuNativeFrame(IDXGISwapChain* sc);  // before the game's Present: nothing at all when neither is shown
+void menuNativeStats(unsigned* drawn, unsigned* acquired);  // totals since launch
+// between the native menu frame's first bind and its last restore: main.cpp's context hooks pass every call straight
+// through, so the menu's draws never reach the HUD, upscaler or counting logic and the game's state goes back exactly
+extern bool g_nativeDrawing;
 // last threads seen polling input (0 = none) and DirectInput polls since the previous call, for Reflex sleep placement
 void inputThreads(DWORD* dinput, DWORD* xinput, unsigned* diPolls);

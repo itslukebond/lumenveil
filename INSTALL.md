@@ -236,6 +236,14 @@ Use this if a script does not work for you. The game folder is the folder that h
   [d3d12]
   present=0
 
+- The present setting under [d3d12] in ffxv_dlss.ini picks how the picture reaches the screen. 1, the default, is
+  automatic: when frame generation is enabled in the menu as the game starts, the mod presents each frame itself,
+  which frame generation needs. Otherwise the game presents its own picture and the mod draws its menu and fps
+  counter into it, which costs less. With frame generation set up but not wanted, untick its Enabled box in the menu
+  and restart the game. If the box is greyed out after that, put enable=1 under [fg] in ffxv_dlss.ini to bring frame
+  generation back. 2 always uses the mod's own presentation, as versions before 1.0.2 did: try it if the menu or fps
+  counter misbehaves without frame generation, and report it with ffxv_dlss.log. 0 turns it off, as above.
+
 - Insert does nothing with OptiScaler or Special K installed: they must load under another file name than dxgi.dll
   (OptiScaler as version.dll, for example), with their own upscaling, frame generation and presenting options off.
   ffxv_dlss.log then has a line starting "dxgi: the game's swap chain was passed on by", then "d3d12: init". Lines

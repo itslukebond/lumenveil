@@ -194,6 +194,14 @@ The scaling mode is written to `RenderingResolutionRatio` in the game's
 `%USERPROFILE%\Documents\My Games\FINAL FANTASY XV\Steam\<id>\savestorage\GraphicsConfig.ini`. That's the Documents
 folder in your user folder, which the game uses even if Windows keeps your Documents in OneDrive.
 
+How the picture reaches the screen is set by `present` under `[d3d12]` in `ffxv_dlss.ini`, which has no menu entry.
+`1`, the default, is automatic: when frame generation is enabled in the menu as the game starts, the mod presents each
+frame itself, which frame generation needs. Otherwise the game presents its own picture and the mod draws its menu and
+fps counter into it, which costs less. With frame generation set up but not wanted, untick its Enabled box and restart
+the game (if the box is greyed out after that, `enable=1` under `[fg]` brings frame generation back). `2` always uses
+the mod's own presentation, as versions before 1.0.2 did. `0` turns the mod's presentation off, and the menu, fps
+counter and frame generation with it.
+
 ---
 
 ## Uninstall

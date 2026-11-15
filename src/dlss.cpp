@@ -276,8 +276,8 @@ void releaseTargets() {
 bool ensureTargets(UINT w, UINT h) {
     if (g_mvTex && g_texW == w && g_texH == h) return true;
     releaseTargets();
-    // shared with D3D12 when frame generation reads them there
-    const UINT misc = p12Enabled() ? D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE : 0;
+    // shared with D3D12 when a D3D12 device exists to read them (frame generation, FSR or XeSS upscaling)
+    const UINT misc = p12Device() ? D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE : 0;
     D3D11_TEXTURE2D_DESC d = { w, h, 1, 1, DXGI_FORMAT_R16G16_FLOAT, {1, 0}, D3D11_USAGE_DEFAULT,
                                D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS, 0, misc };
     if (FAILED(g_dev->CreateTexture2D(&d, nullptr, &g_mvTex)) ||

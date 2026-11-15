@@ -20,10 +20,11 @@ target_sources(dxgi PRIVATE src/dlss.cpp)
 target_include_directories(dxgi PRIVATE third_party/dlss/include)
 target_link_libraries(dxgi PRIVATE ${CMAKE_SOURCE_DIR}/third_party/dlss/lib/Windows_x86_64/x64/nvsdk_ngx_s.lib windowscodecs ole32 version)
 
-# Insert menu + fps counter (Dear ImGui, MIT), drawn by the D3D12 presenter
+# Insert menu + fps counter (Dear ImGui, MIT): drawn by the D3D12 presenter (imgui_impl_dx12), or natively on the game's
+# D3D11 device when no frame generation backend started (imgui_impl_dx11); one backend is initialised per launch
 set(IMGUI third_party/imgui)
 target_sources(dxgi PRIVATE src/menu.cpp src/res/dxgi.rc ${IMGUI}/imgui.cpp ${IMGUI}/imgui_draw.cpp ${IMGUI}/imgui_tables.cpp ${IMGUI}/imgui_widgets.cpp
-                            ${IMGUI}/backends/imgui_impl_dx12.cpp)
+                            ${IMGUI}/backends/imgui_impl_dx12.cpp ${IMGUI}/backends/imgui_impl_dx11.cpp)
 # the resource script embeds the menu logo, so a new logo.png rebuilds it
 set_source_files_properties(src/res/dxgi.rc PROPERTIES OBJECT_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/res/logo.png)
 target_include_directories(dxgi PRIVATE ${IMGUI})

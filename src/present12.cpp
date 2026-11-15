@@ -13,6 +13,7 @@
 #include "antilag_rules.h"
 #include "colour_space.h"
 #include "vsync_rules.h"
+#include "present_mode.h"
 #include <d3d11_4.h>
 #include <d3d12.h>
 #include <dxgi1_6.h>
@@ -29,6 +30,8 @@
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wmicrosoft-cast"  // AMD's header, kept unmodified, casts GetProcAddress's result
 #include <ffx_antilag2_dx12.h>  // AMD Radeon Anti-Lag 2 (MIT header, third_party/amd-antilag2); AMD's driver does the work
+#pragma clang diagnostic ignored "-Wmicrosoft-pure-definition"  // the D3D11 header, kept unmodified, defines a pure destructor
+#include <ffx_antilag2_dx11.h>  // the same SDK's D3D11 path, for native presentation
 #pragma clang diagnostic pop
 
 ID3D12Device* g_d3d12;
@@ -150,19 +153,21 @@ int nvapiHdrMode(const wchar_t* gdiName) {
     return d.mode;
 }
 
-void refreshEncoding() {
-    DXGI_SWAP_CHAIN_DESC1 sd; g_sc->GetDesc1(&sd);
+// The encoding the menu and counter are drawn in, from the swap chain on screen: ours, or natively the game's.
+void refreshEncoding(IDXGISwapChain* sc) {
+    DXGI_SWAP_CHAIN_DESC sd = {}; sc->GetDesc(&sd);
     IDXGIOutput* o = nullptr; IDXGIOutput6* o6 = nullptr; DXGI_OUTPUT_DESC1 od = {};
-    if (SUCCEEDED(g_sc->GetContainingOutput(&o)) && SUCCEEDED(o->QueryInterface(IID_PPV_ARGS(&o6)))) o6->GetDesc1(&od);
+    if (SUCCEEDED(sc->GetContainingOutput(&o)) && SUCCEEDED(o->QueryInterface(IID_PPV_ARGS(&o6)))) o6->GetDesc1(&od);
     release(o6); release(o);
     const int mode = od.DeviceName[0] ? nvapiHdrMode(od.DeviceName) : -1;
-    const int enc = sd.Format == DXGI_FORMAT_R16G16B16A16_FLOAT ? 2
+    const int enc = sd.BufferDesc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT ? 2
                   : od.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020 || mode == 2 || mode == 5 || mode == 6 ? 1 : 0;
     if (od.MaxLuminance > 0) { g_lum[0] = od.MinLuminance; g_lum[1] = od.MaxLuminance; }
-    if (enc != g_encode) logf("d3d12: output %s (NVAPI HDR mode %d, display %.4f-%.0f nits)", enc == 1 ? "HDR10 (PQ)" : enc == 2 ? "scRGB" : "SDR",
-                              mode, g_lum[0], g_lum[1]);
+    if (enc != g_encode) logf("%s: output %s (NVAPI HDR mode %d, display %.4f-%.0f nits)", sc == g_sc ? "d3d12" : "native",
+                              enc == 1 ? "HDR10 (PQ)" : enc == 2 ? "scRGB" : "SDR", mode, g_lum[0], g_lum[1]);
     g_encode = enc;
 }
+void refreshEncoding() { refreshEncoding(g_sc); }
 
 void releaseTargets() {
     waitIdle();
@@ -342,6 +347,14 @@ int autoCap() {
 int g_autoCap;
 bool g_wantSync, g_syncKnown;  // the frame cap stands in for the game's VSync (Windows, our own Present); vsync_rules.h
 bool g_watchdog;               // the stall watchdog thread has been started
+// Native presentation (present_mode.h): no frame generation backend started, so the game keeps its own swap chain.
+bool g_native;                 // decided once, in the first p12Init
+IDXGISwapChain* g_nativeSc;    // the game's current swap chain: compared, never referenced
+bool g_nativeTearing;          // it was created with the tearing flag
+bool g_tearRefused;            // a Present with the tearing flag was refused: not added again this launch
+AMD::AntiLag2DX11::Context g_al11;  // Anti-Lag 2 natively, through AMD's D3D11 driver extension
+LARGE_INTEGER g_nativeT0, g_nativeT1;  // this frame: the "before" call's start, and the game's Present's start
+unsigned long long g_nativeMenuUs, g_nativePresentUs;  // since the last native: timing line
 
 // Where the render thread is, for the stall watchdog: set before each step of our present path that can wait.
 enum { kStageGame, kStageCopy, kStageFg, kStageMenu, kStagePresent, kStageAfter, kStagePace, kStageAntiLag, kStageResize,
@@ -547,6 +560,11 @@ PFN_SetColorSpace1 o_SetColorSpace1;
 PFN_SetHDRMetaData o_SetHDRMetaData;
 
 HRESULT STDMETHODCALLTYPE hk_ResizeBuffers(IDXGISwapChain* sc, UINT n, UINT w, UINT h, DXGI_FORMAT f, UINT fl) {
+    if (g_native) {  // a swap chain made with the tearing flag must be resized with it (DXGI refuses otherwise)
+        const HRESULT hr = o_ResizeBuffers(sc, n, w, h, f, sc == g_nativeSc && g_nativeTearing ? fl | DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : fl);
+        if (SUCCEEDED(hr) && sc == g_nativeSc) refreshEncoding(sc);  // a new format can change it: the menu's next frame follows
+        return hr;
+    }
     if (sc != g_game) return o_ResizeBuffers(sc, n, w, h, f, fl);
     g_stage = kStageResize;
     if (!w || !h) { RECT r; GetClientRect(g_wnd, &r); w = r.right; h = r.bottom; }  // the hidden window's size means nothing
@@ -610,6 +628,7 @@ void fail(const char* what, HRESULT hr) {
     xessFgDestroy();  // after our last reference to Intel's swapchain (it refuses otherwise), before the queue it uses
     // Anti-Lag 2 after FSR's presenter thread has stopped (fsrFgDestroy) and before the device; a no-op if never started
     AMD::AntiLag2DX12::DeInitialize(&g_al2); g_al2State = kAl2NotStarted; g_al2DataSc = nullptr; g_al2DataOn = false;
+    AMD::AntiLag2DX11::DeInitialize(&g_al11);
     release(g_cl[0]); release(g_cl[1]); release(g_cl[2]); release(g_alloc);
     release(g_fence11); release(g_fence); release(g_up11); release(g_up); release(g_ctx11); release(g_dev11);
     release(g_d3d12Queue); release(g_d3d12); release(g_factory);
@@ -649,13 +668,16 @@ namespace {
 // FSR's stand-in for Reflex, run after Present (before the game starts its next frame): wait until the GPU has copied
 // out the previous frame, so the game is never more than one frame ahead of it, then hold to the frame cap (output fps,
 // as Reflex's: rendered = cap / 2 while generating).
-void fsrPace() {
+// Natively (waitCopy false) only the cap runs: there is no copy of ours to wait for.
+void fsrPace(bool waitCopy = true) {
     static HANDLE ev = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     static HANDLE timer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
     static UINT64 prev;
     static LARGE_INTEGER next;
-    if (prev && g_fence->GetCompletedValue() < prev) { g_fence->SetEventOnCompletion(prev, ev); WaitForSingleObject(ev, 100); }
-    prev = g_copyDone;
+    if (waitCopy) {
+        if (prev && g_fence->GetCompletedValue() < prev) { g_fence->SetEventOnCompletion(prev, ev); WaitForSingleObject(ev, 100); }
+        prev = g_copyDone;
+    }
     const int cap = vsyncCap(g_set.limit, g_autoCap, g_wantSync);
     LARGE_INTEGER now; QueryPerformanceCounter(&now);
     if (cap <= 0) { next = now; return; }
@@ -694,7 +716,7 @@ FgStatus fgStatus() {
     s.available = g_fg || proxyFg(); s.generating = proxyFg() ? g_fsrGen || g_xessGen : g_fgOn; s.autoCap = g_autoCap;
     s.backend = g_xessSc ? 2 : g_fsrFg ? 1 : g_fg ? 0 : -1;
     s.formatRefused = g_xessRefused;
-    s.antilag = g_al2State; s.antilagOn = g_al2.m_enabled;
+    s.antilag = g_al2State; s.antilagOn = g_native ? g_al11.m_enabled : g_al2.m_enabled;
     if (proxyFg()) { s.dynamicSupported = false; s.maxGenerated = 1; }  // FSR and XeSS generate one frame per rendered one
     return s;
 }
@@ -773,7 +795,38 @@ DWORD WINAPI stallWatchdog(void*) {
     }
 }
 
+// Natively a D3D12 device whose creation failed part way: FSR and XeSS upscaling are unavailable, the game is unaffected.
+static void releaseDevice12() {
+    release(g_fence11); release(g_fence); release(g_up11); release(g_up); release(g_alloc); release(g_d3d12Queue); release(g_d3d12);
+}
+
+// Native presentation: no swap chain or window of ours. On Windows the game's own swap chain gets the tearing flag where
+// DXGI supports it (main.cpp's creation hooks ask p12NativeTearing), and Anti-Lag 2 goes through AMD's D3D11 path.
+static HWND nativeInit(IDXGIFactory2* f, HWND wnd) {
+    g_native = true;
+    IDXGIFactory5* f5 = nullptr; BOOL tear = FALSE;
+    if (SUCCEEDED(f->QueryInterface(IID_PPV_ARGS(&f5)))) { f5->CheckFeatureSupport(DXGI_FEATURE_PRESENT_ALLOW_TEARING, &tear, sizeof tear); f5->Release(); }
+    g_tearing = nativeTearingFlag(tear != FALSE, g_wine);
+    g_wnd = wnd;  // the frame cap's refresh rate and the stall watchdog
+    g_autoCap = autoCap();
+    QueryPerformanceFrequency(&g_qpf);
+    const HRESULT al2Hr = !g_wine && g_vendor == 0x1002 ? AMD::AntiLag2DX11::Initialize(&g_al11) : S_OK;
+    g_al2State = al2Classify(g_vendor, g_wine, al2Hr);
+    switch (g_al2State) {
+    case kAl2NotAmd: logf("antilag: not an AMD card"); break;
+    case kAl2Wine: logf("antilag: not started under Wine/Proton (needs AMD's Windows driver)"); break;
+    case kAl2NoDriver: logf("antilag: AMD's D3D11 driver extension is not loaded (amdxx64.dll), unavailable"); break;
+    case kAl2Refused: logf("antilag: AMD's D3D11 driver refused Anti-Lag 2 (%08x): needs RX 5000 or newer and Adrenalin 24.7.1 or newer", al2Hr); break;
+    default: logf("antilag: available through D3D11, setting %s", g_set.antilag ? "on" : "off"); break;
+    }
+    logf("native: no frame generation backend started, the game presents on its own swap chain (D3D12 device: %s; tearing: %s)",
+         g_d3d12 ? "for FSR and XeSS upscaling" : "none", g_tearing ? "allowed at interval 0" : "off");
+    flushLog();
+    return nullptr;
+}
+
 HWND p12Init(IUnknown* dev, IDXGIFactory2* f, PFN_CreateSCHwnd create, HWND wnd, const DXGI_SWAP_CHAIN_DESC1* desc) {
+    if (g_native) return nullptr;  // the game recreates its swap chain at start-up: a native launch stays native (g_d3d12 may exist)
     if (g_d3d12) return reattach(wnd, desc);
     Busy busy;
     logf("d3d12: init for hwnd %p %ux%u fmt %u flags %x", (void*)wnd, desc->Width, desc->Height, desc->Format, desc->Flags); flushLog();
@@ -805,6 +858,14 @@ HWND p12Init(IUnknown* dev, IDXGIFactory2* f, PFN_CreateSCHwnd create, HWND wnd,
     noteXessFormat(xessWant, desc->Format);
     logf("fg: backend %s (setting %d, GPU vendor %04x, Wine %s)", g_xessFg ? "XeSS" : g_fsrFg ? "FSR" : g_fg ? "DLSS-G" : "none", setting, g_vendor,
          g_wine ? "yes: settled, drained re-activation" : "no");
+    if (!g_watchdog) {
+        g_watchdog = true;
+        if (HANDLE th = CreateThread(nullptr, 0, stallWatchdog, nullptr, 0, nullptr)) CloseHandle(th);
+    }
+    // Presentation mode, once per launch (present_mode.h): with no frame generation backend started the game keeps its own
+    // swap chain. Natively a D3D12 device exists only for FSR or XeSS upscaling.
+    const bool native = presentMode(ini(L"d3d12", L"present", 1), g_fg || g_fsrFg || g_xessFg) == kPresentNative;
+    if (native && !nativeNeedsD3D12(fsrPresent(), xessPresent())) { ad->Release(); return nativeInit(f, wnd); }
     ID3D12DeviceRemovedExtendedDataSettings* dred = nullptr;
     if (ini(L"d3d12", L"dred", 0) && SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&dred)))) {
         dred->SetAutoBreadcrumbsEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
@@ -837,10 +898,16 @@ HWND p12Init(IUnknown* dev, IDXGIFactory2* f, PFN_CreateSCHwnd create, HWND wnd,
     if (SUCCEEDED(hr)) hr = g_d3d12->CreateSharedHandle(g_up, nullptr, GENERIC_ALL, nullptr, &h);
     if (SUCCEEDED(hr)) hr = g_dev11->OpenSharedFence(h, IID_PPV_ARGS(&g_up11));
     if (h) CloseHandle(h);
+    if (FAILED(hr) && native) {
+        logf("native: D3D12 device for FSR and XeSS upscaling failed %08x, those upscalers are unavailable", hr);
+        releaseDevice12();
+        return nativeInit(f, wnd);
+    }
     if (FAILED(hr)) { fail("D3D12 device/fence", hr); return nullptr; }
     logf("d3d12: device, queue and shared fence ready"); flushLog();
     if (!g_idleEvent) g_idleEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     if (!g_drainEvent) g_drainEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if (native) return nativeInit(f, wnd);
 
     // Same size, format and flags as the game asked for, so presentation behaves as it would natively.
     DXGI_SWAP_CHAIN_DESC1 sd = *desc;
@@ -894,16 +961,82 @@ HWND p12Init(IUnknown* dev, IDXGIFactory2* f, PFN_CreateSCHwnd create, HWND wnd,
     newDummy(wnd);
     DXGI_SWAP_CHAIN_DESC1 cur; g_sc->GetDesc1(&cur);
     if (menuInit(g_d3d12, g_d3d12Queue, wnd, cur.Height)) menuTargets(g_sc);
-    if (!g_watchdog) {
-        g_watchdog = true;
-        if (HANDLE th = CreateThread(nullptr, 0, stallWatchdog, nullptr, 0, nullptr)) CloseHandle(th);
-    }
     logf("d3d12: presenting via D3D12 swapchain %p on hwnd %p; game swapchain on hidden %p (flags %x)", (void*)g_sc, (void*)wnd, (void*)g_dummy, sd.Flags);
     flushLog();
     return g_dummy;
 }
 
 void p12Abort() { fail("game swapchain on hidden window", E_FAIL); }
+
+bool p12Native() { return g_native; }
+bool p12Device() { return g_d3d12 != nullptr; }
+bool p12NativeTearing() { return g_native && g_tearing && !g_tearRefused; }
+bool p12IsNative(IDXGISwapChain* sc) { return g_native && sc && sc == g_nativeSc; }
+
+// The game's swap chain, natively: compared by pointer only (no reference, so its resize and recreation are never held up).
+void p12NativeAttach(IDXGISwapChain* sc, bool tearing) {
+    if (!o_ResizeBuffers) {
+        MH_CreateHook((*(void***)sc)[13], (void*)hk_ResizeBuffers, (void**)&o_ResizeBuffers);
+        MH_EnableHook(MH_ALL_HOOKS);
+    }
+    g_nativeSc = sc; g_nativeTearing = tearing;
+    DXGI_SWAP_CHAIN_DESC d = {}; sc->GetDesc(&d);
+    logf("native: presenting on the game's own swap chain %ux%u fmt %u flags %x", d.BufferDesc.Width, d.BufferDesc.Height,
+         d.BufferDesc.Format, d.Flags);
+    refreshEncoding(sc);
+    menuInitNative(g_dev11, g_wnd, d.BufferDesc.Height);  // once per launch; later calls return at once
+    flushLog();
+}
+
+// Natively, before the game's Present: the menu and counter into its back buffer, then the flags to present with.
+UINT p12NativeBefore(IDXGISwapChain* sc, UINT si, UINT flags) {
+    QueryPerformanceCounter(&g_nativeT0);
+    if (!(flags & DXGI_PRESENT_TEST)) { g_renderTid = GetCurrentThreadId(); g_stage = kStageMenu; menuNativeFrame(sc); }
+    g_stage = kStagePresent;
+    QueryPerformanceCounter(&g_nativeT1);
+    g_nativeMenuUs += (g_nativeT1.QuadPart - g_nativeT0.QuadPart) * 1000000 / g_qpf.QuadPart;
+    return !(flags & DXGI_PRESENT_TEST) && nativeTearing(g_nativeTearing, g_wine, si, g_tearRefused) ? flags | DXGI_PRESENT_ALLOW_TEARING : flags;
+}
+void p12NativeTearingRefused() {
+    if (g_tearRefused) return;
+    g_tearRefused = true;
+    logf("native: a Present with tearing allowed was refused: presenting without it for the rest of this launch");
+}
+
+// Natively, after the game's Present: the counter, the encoding, the frame cap (with FSR or XeSS upscaling, as before),
+// Anti-Lag 2, and a timing line every 2 s.
+void p12NativeAfter(IDXGISwapChain* sc, UINT flags) {
+    if (flags & DXGI_PRESENT_TEST) { g_stage = kStageGame; return; }
+    LARGE_INTEGER t; QueryPerformanceCounter(&t);
+    g_nativePresentUs += (t.QuadPart - g_nativeT1.QuadPart) * 1000000 / g_qpf.QuadPart;
+    ++g_presents;
+    g_stage = kStageAfter;
+    menuCount(1);
+    static unsigned presents, lastPresents, lastDrawn, lastAcquired;
+    static LARGE_INTEGER last;
+    if (++presents % 240 == 0) refreshEncoding(sc);
+    g_stage = kStagePace;
+    if (ownPace(false, false, dlssInfo().active, false)) fsrPace(false);  // the cap with FSR or XeSS upscaling; the game's VSync is its own
+    g_stage = kStageAntiLag;
+    const bool al2 = al2Run(g_al2State, g_set.antilag, false, false);
+    if (al2 || g_al11.m_enabled) {  // AMD's driver holds the game's next frame here; off: one call turns it off, then none
+        const bool was = g_al11.m_enabled;
+        const HRESULT r = AMD::AntiLag2DX11::Update(&g_al11, al2, 0);
+        if (al2 != was) logf("antilag: %s", al2 ? "on" : "off");
+        if (FAILED(r) && !g_al2Logged) { logf("antilag: update failed %08x", r); g_al2Logged = true; }
+    }
+    if (!last.QuadPart) last = t;
+    if (t.QuadPart - last.QuadPart >= 2 * g_qpf.QuadPart) {
+        unsigned drawn = 0, acquired = 0;
+        menuNativeStats(&drawn, &acquired);
+        const unsigned n = presents - lastPresents;
+        logf("native: %u presents, %u menu frames drawn, %u back buffers acquired, menu frame %.0f us, game's Present %.0f us (averages)",
+             n, drawn - lastDrawn, acquired - lastAcquired, double(g_nativeMenuUs) / n, double(g_nativePresentUs) / n);
+        lastPresents = presents; lastDrawn = drawn; lastAcquired = acquired; last = t;
+        g_nativeMenuUs = g_nativePresentUs = 0;
+    }
+    g_stage = kStageGame;
+}
 
 void p12Attach(IDXGISwapChain* game) {
     g_game = game;

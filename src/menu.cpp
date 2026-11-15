@@ -1,4 +1,5 @@
-// In-game settings menu (Insert) and fps counter, drawn with Dear ImGui by the D3D12 presenter ([d3d12] present=1).
+// In-game settings menu (Insert) and fps counter, drawn with Dear ImGui by the D3D12 presenter, or natively (no frame
+// generation backend started, present_mode.h) on the game's own D3D11 device into its own back buffer.
 // ImGui renders into an offscreen RGBA8 texture (premultiplied, sRGB values); one fullscreen-triangle pass blends that
 // onto the back buffer, encoding for the output (SDR as is, HDR10 to PQ, scRGB to linear). The game's D3D11 state is
 // never touched. While the menu is open the game's DirectInput and XInput reads come back empty, and DirectInput mouse
@@ -10,6 +11,8 @@
 #include "game_config.h"
 #include "xess_rules.h"
 #include "antilag_rules.h"
+#include "native_frame.h"
+#include <d3d11_1.h>
 #include <d3d12.h>
 #include <dxgi1_6.h>
 #include <d3dcompiler.h>
@@ -25,6 +28,7 @@
 #include <cmath>
 #include <imgui.h>
 #include <backends/imgui_impl_dx12.h>
+#include <backends/imgui_impl_dx11.h>
 
 namespace {
 constexpr UINT kFrames = 3;
@@ -47,6 +51,24 @@ ID3D12Resource* g_logo;  // the menu logo (null if it could not be loaded)
 float g_logoW, g_logoH;
 UINT g_w, g_h, g_encode;                       // encode: 0 SDR, 1 HDR10 PQ, 2 scRGB
 HWND g_wnd;
+// Native: the same menu on the game's D3D11 device. ImGui draws into g_tex11, the composite blends it onto the back buffer.
+bool g_native;
+ID3D11Device* g_dev11;
+ID3D11DeviceContext* g_ctx11;
+ID3D11DeviceContext1* g_ctx11_1;  // ClearView, to clear only the area drawn in (null: the whole texture)
+ID3D11Texture2D* g_tex11;
+ID3D11RenderTargetView* g_texRtv11;
+ID3D11ShaderResourceView *g_texSrv11, *g_logo11;
+ID3D11VertexShader* g_vs11;
+ID3D11PixelShader* g_ps11;
+ID3D11Buffer* g_cb11;
+ID3D11BlendState* g_blend11;
+ID3D11RasterizerState* g_rs11;
+ID3D11DepthStencilState* g_ds11;
+UINT g_cbEncode = ~0u;
+D3D12_RECT g_nativeBox;           // this frame's area drawn in, from compose
+NativeTargetKey g_nativeBuilt;    // the back buffer g_tex11 was built for
+unsigned g_nativeDrawn, g_nativeAcquired;
 ImFont *g_font, *g_big, *g_bigThin;  // g_bigThin: base fps, lighter than the bold output fps
 const char* g_fontName = "ImGui default";
 char g_gpu[64];  // e.g. "RTX 4070": the adapter's name without the vendor prefix, for the counter
@@ -244,13 +266,19 @@ float4 ps(float4 pos : SV_Position) : SV_Target {
 }
 )";
 
+// The composite's two shaders, for either renderer.
+HRESULT compileComposite(ID3DBlob** vs, ID3DBlob** ps, ID3DBlob** err) {
+    const pD3DCompile compile = shaderCompiler();
+    HRESULT hr = compile ? compile(kHlsl, sizeof kHlsl - 1, "menu", nullptr, nullptr, "vs", "vs_5_0", 0, 0, vs, err) : E_FAIL;
+    if (SUCCEEDED(hr)) hr = compile(kHlsl, sizeof kHlsl - 1, "menu", nullptr, nullptr, "ps", "ps_5_0", 0, 0, ps, err);
+    return hr;
+}
+
 bool createPso(DXGI_FORMAT fmt) {
     if (g_pso && g_psoFmt == fmt) return true;
     release(g_pso);
     ID3DBlob *vs = nullptr, *ps = nullptr, *err = nullptr;
-    const pD3DCompile compile = shaderCompiler();
-    HRESULT hr = compile ? compile(kHlsl, sizeof kHlsl - 1, "menu", nullptr, nullptr, "vs", "vs_5_0", 0, 0, &vs, &err) : E_FAIL;
-    if (SUCCEEDED(hr)) hr = compile(kHlsl, sizeof kHlsl - 1, "menu", nullptr, nullptr, "ps", "ps_5_0", 0, 0, &ps, &err);
+    HRESULT hr = compileComposite(&vs, &ps, &err);
     if (SUCCEEDED(hr) && !g_rs) {
         D3D12_DESCRIPTOR_RANGE range = { D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0, 0, 0 };
         D3D12_ROOT_PARAMETER rp[2] = {};
@@ -289,6 +317,142 @@ bool createPso(DXGI_FORMAT fmt) {
     release(vs); release(ps); release(err);
     return SUCCEEDED(hr);
 }
+
+// Natively: the composite's shaders (the same kHlsl, through shaderCompiler) and fixed state, made once.
+bool nativeObjects() {
+    ID3DBlob *vs = nullptr, *ps = nullptr, *err = nullptr;
+    HRESULT hr = compileComposite(&vs, &ps, &err);
+    if (SUCCEEDED(hr)) hr = g_dev11->CreateVertexShader(vs->GetBufferPointer(), vs->GetBufferSize(), nullptr, &g_vs11);
+    if (SUCCEEDED(hr)) hr = g_dev11->CreatePixelShader(ps->GetBufferPointer(), ps->GetBufferSize(), nullptr, &g_ps11);
+    D3D11_BUFFER_DESC bd = { 16, D3D11_USAGE_DEFAULT, D3D11_BIND_CONSTANT_BUFFER };
+    if (SUCCEEDED(hr)) hr = g_dev11->CreateBuffer(&bd, nullptr, &g_cb11);
+    D3D11_BLEND_DESC bl = {};  // premultiplied over the frame, alpha left as the game wrote it
+    bl.RenderTarget[0] = { TRUE, D3D11_BLEND_ONE, D3D11_BLEND_INV_SRC_ALPHA, D3D11_BLEND_OP_ADD, D3D11_BLEND_ZERO, D3D11_BLEND_ONE,
+                           D3D11_BLEND_OP_ADD, D3D11_COLOR_WRITE_ENABLE_RED | D3D11_COLOR_WRITE_ENABLE_GREEN | D3D11_COLOR_WRITE_ENABLE_BLUE };
+    if (SUCCEEDED(hr)) hr = g_dev11->CreateBlendState(&bl, &g_blend11);
+    D3D11_RASTERIZER_DESC rd = { D3D11_FILL_SOLID, D3D11_CULL_NONE, FALSE, 0, 0, 0, TRUE, TRUE, FALSE, FALSE };
+    if (SUCCEEDED(hr)) hr = g_dev11->CreateRasterizerState(&rd, &g_rs11);
+    D3D11_DEPTH_STENCIL_DESC dd = {};
+    if (SUCCEEDED(hr)) hr = g_dev11->CreateDepthStencilState(&dd, &g_ds11);
+    if (FAILED(hr)) logf("menu: native composite failed %08x %s", hr, err ? (const char*)err->GetBufferPointer() : "");
+    release(vs); release(ps); release(err);
+    return SUCCEEDED(hr);
+}
+
+// Natively: the game's D3D11 state the native frame touches, saved before its first bind and put back after its last,
+// on every path. main.cpp's hooks pass these calls straight through meanwhile (g_nativeDrawing).
+struct D3D11State {
+    static constexpr UINT kCi = 256;  // D3D11's limit on class instances per stage
+    D3D11_PRIMITIVE_TOPOLOGY topo; ID3D11InputLayout* il; ID3D11Buffer *vb, *ib; UINT vbStride, vbOffset, ibOffset; DXGI_FORMAT ibFmt;
+    ID3D11VertexShader* vs; ID3D11PixelShader* ps; ID3D11GeometryShader* gs; ID3D11HullShader* hs; ID3D11DomainShader* ds; ID3D11ComputeShader* cs;
+    ID3D11ClassInstance* ci[6][kCi]; UINT nci[6];
+    ID3D11ShaderResourceView* psSrv; ID3D11SamplerState* psSmp; ID3D11Buffer *psCb, *vsCb;
+    ID3D11RasterizerState* rs; D3D11_VIEWPORT vp[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE]; UINT nvp;
+    D3D11_RECT sc[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE]; UINT nsc;
+    ID3D11BlendState* blend; float factor[4]; UINT mask; ID3D11DepthStencilState* dss; UINT ref;
+    ID3D11RenderTargetView* rtv[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT]; ID3D11DepthStencilView* dsv;
+
+    void save(ID3D11DeviceContext* c) {
+        c->IAGetPrimitiveTopology(&topo); c->IAGetInputLayout(&il); c->IAGetVertexBuffers(0, 1, &vb, &vbStride, &vbOffset);
+        c->IAGetIndexBuffer(&ib, &ibFmt, &ibOffset);
+        for (UINT& n : nci) n = kCi;
+        c->VSGetShader(&vs, ci[0], &nci[0]); c->PSGetShader(&ps, ci[1], &nci[1]); c->GSGetShader(&gs, ci[2], &nci[2]);
+        c->HSGetShader(&hs, ci[3], &nci[3]); c->DSGetShader(&ds, ci[4], &nci[4]); c->CSGetShader(&cs, ci[5], &nci[5]);
+        c->PSGetShaderResources(0, 1, &psSrv); c->PSGetSamplers(0, 1, &psSmp); c->PSGetConstantBuffers(0, 1, &psCb); c->VSGetConstantBuffers(0, 1, &vsCb);
+        c->RSGetState(&rs);
+        nvp = nsc = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+        c->RSGetViewports(&nvp, vp); c->RSGetScissorRects(&nsc, sc);
+        c->OMGetBlendState(&blend, factor, &mask); c->OMGetDepthStencilState(&dss, &ref);
+        c->OMGetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, rtv, &dsv);
+    }
+    void restore(ID3D11DeviceContext* c) {
+        c->IASetPrimitiveTopology(topo); c->IASetInputLayout(il); c->IASetVertexBuffers(0, 1, &vb, &vbStride, &vbOffset);
+        c->IASetIndexBuffer(ib, ibFmt, ibOffset);
+        c->VSSetShader(vs, ci[0], nci[0]); c->PSSetShader(ps, ci[1], nci[1]); c->GSSetShader(gs, ci[2], nci[2]);
+        c->HSSetShader(hs, ci[3], nci[3]); c->DSSetShader(ds, ci[4], nci[4]); c->CSSetShader(cs, ci[5], nci[5]);
+        c->PSSetShaderResources(0, 1, &psSrv); c->PSSetSamplers(0, 1, &psSmp); c->PSSetConstantBuffers(0, 1, &psCb); c->VSSetConstantBuffers(0, 1, &vsCb);
+        c->RSSetState(rs); c->RSSetViewports(nvp, vp); c->RSSetScissorRects(nsc, sc);
+        c->OMSetBlendState(blend, factor, mask); c->OMSetDepthStencilState(dss, ref);
+        c->OMSetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, rtv, dsv);
+        release(il); release(vb); release(ib); release(vs); release(ps); release(gs); release(hs); release(ds); release(cs);
+        for (UINT k = 0; k < 6; ++k) for (UINT i = 0; i < nci[k]; ++i) release(ci[k][i]);
+        release(psSrv); release(psSmp); release(psCb); release(vsCb); release(rs); release(blend); release(dss);
+        for (auto*& r : rtv) release(r);
+        release(dsv);
+    }
+};
+D3D11State g_saved;
+
+// Natively: the mod's texture at the back buffer's size (the composite's view on the back buffer takes the swap chain's
+// format, as the D3D12 composite's pipeline does).
+bool nativeTargets(const NativeTargetKey& k) {
+    release(g_texRtv11); release(g_texSrv11); release(g_tex11);
+    g_w = k.w; g_h = k.h;
+    D3D11_TEXTURE2D_DESC td = { k.w, k.h, 1, 1, DXGI_FORMAT_R8G8B8A8_UNORM, {1, 0}, D3D11_USAGE_DEFAULT,
+                                D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE, 0, 0 };
+    HRESULT hr = g_dev11->CreateTexture2D(&td, nullptr, &g_tex11);
+    if (SUCCEEDED(hr)) hr = g_dev11->CreateRenderTargetView(g_tex11, nullptr, &g_texRtv11);
+    if (SUCCEEDED(hr)) hr = g_dev11->CreateShaderResourceView(g_tex11, nullptr, &g_texSrv11);
+    if (FAILED(hr)) { release(g_texRtv11); release(g_texSrv11); release(g_tex11); }
+    g_encode = p12OutputEncoding(nullptr);
+    logf("menu: targets %ux%u fmt %u, output %s: %08x", k.w, k.h, k.fmt, g_encode == 1 ? "HDR10 (PQ)" : g_encode == 2 ? "scRGB" : "SDR", hr);
+    return SUCCEEDED(hr);
+}
+
+// Natively, between save and restore: ImGui into g_tex11 over the area drawn in, then the composite onto the back buffer.
+bool nativeDraw(ID3D11RenderTargetView* bbRtv) {
+    if (!g_texRtv11) return false;
+    ID3D11DeviceContext* c = g_ctx11;
+    const float clear[4] = {};
+    if (g_ctx11_1) g_ctx11_1->ClearView(g_texRtv11, clear, &g_nativeBox, 1);
+    else c->ClearRenderTargetView(g_texRtv11, clear);
+    const D3D11_VIEWPORT vp = { 0, 0, float(g_w), float(g_h), 0, 1 };
+    c->OMSetRenderTargets(1, &g_texRtv11, nullptr);
+    c->RSSetViewports(1, &vp);
+    ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+    if ((g_encode = p12OutputEncoding(nullptr)) != g_cbEncode) {
+        const UINT cb[4] = { g_encode };
+        c->UpdateSubresource(g_cb11, 0, nullptr, cb, 0, 0);
+        g_cbEncode = g_encode;
+    }
+    c->OMSetRenderTargets(1, &bbRtv, nullptr);
+    c->OMSetBlendState(g_blend11, nullptr, 0xffffffff);
+    c->OMSetDepthStencilState(g_ds11, 0);
+    c->RSSetState(g_rs11);
+    c->RSSetViewports(1, &vp);
+    c->RSSetScissorRects(1, &g_nativeBox);
+    c->IASetInputLayout(nullptr);
+    c->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    c->VSSetShader(g_vs11, nullptr, 0);
+    c->GSSetShader(nullptr, nullptr, 0); c->HSSetShader(nullptr, nullptr, 0); c->DSSetShader(nullptr, nullptr, 0);
+    c->PSSetShader(g_ps11, nullptr, 0);
+    c->PSSetShaderResources(0, 1, &g_texSrv11);
+    c->PSSetConstantBuffers(0, 1, &g_cb11);
+    c->Draw(3, 0);
+    return true;
+}
+
+// The real operations nativeFrame (native_frame.h) runs in its fixed order.
+struct D3D11FrameOps {
+    IDXGISwapChain* sc;
+    ID3D11Texture2D* bb = nullptr;
+    ID3D11RenderTargetView* rtv = nullptr;
+    D3D11_TEXTURE2D_DESC desc = {};
+    bool acquire() {
+        if (FAILED(sc->GetBuffer(0, IID_PPV_ARGS(&bb)))) { bb = nullptr; return false; }
+        ++g_nativeAcquired;
+        bb->GetDesc(&desc);
+        return true;
+    }
+    NativeTargetKey key() const { return { desc.Width, desc.Height, UINT(desc.Format) }; }
+    bool view() { if (SUCCEEDED(g_dev11->CreateRenderTargetView(bb, nullptr, &rtv))) return true; rtv = nullptr; return false; }
+    bool rebuild(const NativeTargetKey& k) { return nativeTargets(k); }
+    void save() { g_nativeDrawing = true; g_saved.save(g_ctx11); }
+    bool draw() { return nativeDraw(rtv); }
+    void restore() { g_saved.restore(g_ctx11); g_nativeDrawing = false; }
+    void releaseView() { release(rtv); }
+    void releaseBuffer() { release(bb); }
+};
 
 D3D12_CPU_DESCRIPTOR_HANDLE cpuAt(ID3D12DescriptorHeap* h, UINT i, D3D12_DESCRIPTOR_HEAP_TYPE t) {
     D3D12_CPU_DESCRIPTOR_HANDLE c = h->GetCPUDescriptorHandleForHeapStart(); c.ptr += i * g_dev->GetDescriptorHandleIncrementSize(t); return c;
@@ -469,10 +633,10 @@ void drawMenu() {
     auto missing = [](const wchar_t* f) { return GetFileAttributesW(path(f).c_str()) == INVALID_FILE_ATTRIBUTES; };
     const bool nvidiaGpu = g_vendorId == 0x10DE, intelGpu = g_vendorId == 0x8086;
 
-    if (g_logo) {  // centred, 64% of the content width
+    if (g_logo || g_logo11) {  // centred, 64% of the content width
         const float avail = ImGui::GetContentRegionAvail().x, w = avail * 0.64f;
         ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (avail - w) * 0.5f);
-        ImGui::Image((ImTextureID)gpuAt(g_srvHeap, 2).ptr, { w, w * g_logoH / g_logoW });
+        ImGui::Image(g_native ? (ImTextureID)(uintptr_t)g_logo11 : (ImTextureID)gpuAt(g_srvHeap, 2).ptr, { w, w * g_logoH / g_logoW });
     }
 
     // ---- Upscaling: its controls take the colour of the upscaler running, else of the one the setting asks for
@@ -791,6 +955,18 @@ void loadLogo() {
     release(cv); release(fr); release(dec); release(s); release(wic);
     if (co == S_OK || co == S_FALSE) CoUninitialize();
     if (FAILED(hr)) { logf("menu: logo not loaded %08x", hr); return; }
+    if (g_native) {  // an ordinary D3D11 texture, straight-alpha RGBA8 like ImGui's font texture
+        D3D11_TEXTURE2D_DESC td = { w, h, 1, 1, DXGI_FORMAT_R8G8B8A8_UNORM, {1, 0}, D3D11_USAGE_DEFAULT, D3D11_BIND_SHADER_RESOURCE, 0, 0 };
+        const D3D11_SUBRESOURCE_DATA init = { px.data(), w * 4, 0 };
+        ID3D11Texture2D* t = nullptr;
+        hr = g_dev11->CreateTexture2D(&td, &init, &t);
+        if (SUCCEEDED(hr)) hr = g_dev11->CreateShaderResourceView(t, nullptr, &g_logo11);
+        release(t);
+        if (FAILED(hr)) { logf("menu: logo upload failed %08x", hr); return; }
+        g_logoW = float(w); g_logoH = float(h);
+        logf("menu: logo %ux%u", w, h);
+        return;
+    }
 
     // straight-alpha RGBA8, drawn by ImGui like its font texture
     const UINT pitch = (w * 4 + D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1) & ~(D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1);
@@ -927,8 +1103,12 @@ bool menuInit(ID3D12Device* dev, ID3D12CommandQueue* queue, HWND wnd, UINT heigh
     g_dev = dev; g_queue = queue; g_wnd = wnd;
     g_scale = std::max(1.f, height / 1080.f);
     IDXGIFactory4* f4 = nullptr; IDXGIAdapter1* ad = nullptr; DXGI_ADAPTER_DESC1 ad1 = {};
-    if (SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(&f4))) && SUCCEEDED(f4->EnumAdapterByLuid(dev->GetAdapterLuid(), IID_PPV_ARGS(&ad))) &&
-        SUCCEEDED(ad->GetDesc1(&ad1))) {
+    if (g_native) {  // the game's D3D11 device's adapter
+        IDXGIDevice* dd = nullptr; IDXGIAdapter* a = nullptr;
+        if (SUCCEEDED(g_dev11->QueryInterface(IID_PPV_ARGS(&dd))) && SUCCEEDED(dd->GetAdapter(&a))) a->QueryInterface(IID_PPV_ARGS(&ad));
+        release(a); release(dd);
+    } else if (SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(&f4)))) f4->EnumAdapterByLuid(dev->GetAdapterLuid(), IID_PPV_ARGS(&ad));
+    if (ad && SUCCEEDED(ad->GetDesc1(&ad1))) {
         g_vendorId = ad1.VendorId;
         const wchar_t* n = ad1.Description;
         for (const wchar_t* p : { L"NVIDIA GeForce ", L"NVIDIA " }) if (!wcsncmp(n, p, wcslen(p))) { n += wcslen(p); break; }
@@ -938,16 +1118,18 @@ bool menuInit(ID3D12Device* dev, ID3D12CommandQueue* queue, HWND wnd, UINT heigh
     if (f4) f4->Release();
     g_counter = iniGet(L"overlay", L"enable", 1) != 0;
     g_corner = std::clamp(iniGet(L"overlay", L"corner", 0), 0, 3);
-    D3D12_DESCRIPTOR_HEAP_DESC sd = { D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 3, D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE };
-    D3D12_DESCRIPTOR_HEAP_DESC rd = { D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 3 };
-    HRESULT hr = dev->CreateDescriptorHeap(&sd, IID_PPV_ARGS(&g_srvHeap));
-    if (SUCCEEDED(hr)) hr = dev->CreateDescriptorHeap(&rd, IID_PPV_ARGS(&g_rtvHeap));
-    for (UINT i = 0; SUCCEEDED(hr) && i < kFrames; ++i) hr = dev->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&g_alloc[i]));
-    if (SUCCEEDED(hr)) hr = dev->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, g_alloc[0], nullptr, IID_PPV_ARGS(&g_cl));
-    if (SUCCEEDED(hr)) hr = g_cl->Close();
-    if (SUCCEEDED(hr)) hr = dev->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&g_fence));
-    if (FAILED(hr)) { logf("menu: init failed %08x", hr); return false; }
-    g_event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if (!g_native) {
+        D3D12_DESCRIPTOR_HEAP_DESC sd = { D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 3, D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE };
+        D3D12_DESCRIPTOR_HEAP_DESC rd = { D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 3 };
+        HRESULT hr = dev->CreateDescriptorHeap(&sd, IID_PPV_ARGS(&g_srvHeap));
+        if (SUCCEEDED(hr)) hr = dev->CreateDescriptorHeap(&rd, IID_PPV_ARGS(&g_rtvHeap));
+        for (UINT i = 0; SUCCEEDED(hr) && i < kFrames; ++i) hr = dev->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&g_alloc[i]));
+        if (SUCCEEDED(hr)) hr = dev->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, g_alloc[0], nullptr, IID_PPV_ARGS(&g_cl));
+        if (SUCCEEDED(hr)) hr = g_cl->Close();
+        if (SUCCEEDED(hr)) hr = dev->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&g_fence));
+        if (FAILED(hr)) { logf("menu: init failed %08x", hr); return false; }
+        g_event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    }
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
@@ -956,19 +1138,35 @@ bool menuInit(ID3D12Device* dev, ID3D12CommandQueue* queue, HWND wnd, UINT heigh
     io.ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange | ImGuiConfigFlags_NavEnableGamepad;
     loadFonts();
     applyStyle();
-    ImGui_ImplDX12_InitInfo ii;
-    ii.Device = dev; ii.CommandQueue = queue; ii.NumFramesInFlight = kFrames;
-    ii.RTVFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
-    ii.SrvDescriptorHeap = g_srvHeap;
-    ii.LegacySingleSrvCpuDescriptor = cpuAt(g_srvHeap, 0, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-    ii.LegacySingleSrvGpuDescriptor = gpuAt(g_srvHeap, 0);
-    if (!ImGui_ImplDX12_Init(&ii)) { logf("menu: ImGui DX12 init failed"); return false; }
+    if (g_native) {  // one ImGui backend per launch: D3D11 natively, D3D12 on the presenter
+        if (!ImGui_ImplDX11_Init(g_dev11, g_ctx11)) { logf("menu: ImGui DX11 init failed"); return false; }
+        if (!nativeObjects()) return false;
+    } else {
+        ImGui_ImplDX12_InitInfo ii;
+        ii.Device = dev; ii.CommandQueue = queue; ii.NumFramesInFlight = kFrames;
+        ii.RTVFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+        ii.SrvDescriptorHeap = g_srvHeap;
+        ii.LegacySingleSrvCpuDescriptor = cpuAt(g_srvHeap, 0, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+        ii.LegacySingleSrvGpuDescriptor = gpuAt(g_srvHeap, 0);
+        if (!ImGui_ImplDX12_Init(&ii)) { logf("menu: ImGui DX12 init failed"); return false; }
+    }
     loadLogo();
     hookInput();
     QueryPerformanceFrequency(&g_freq); QueryPerformanceCounter(&g_last); g_statStart = g_last;
     g_ready = true;
-    logf("menu: ready (Insert), ui scale %.2f, fonts %s", g_scale, g_fontName);
+    logf("menu: ready (Insert), ui scale %.2f, fonts %s%s", g_scale, g_fontName, g_native ? ", drawn natively on D3D11" : "");
     return true;
+}
+
+void menuInitNative(ID3D11Device* dev, HWND wnd, UINT height) {
+    static bool tried;  // the game's start-up swap chain recreation attaches again: one init per launch
+    if (tried) return;
+    tried = true;
+    g_native = true;
+    g_dev11 = dev;
+    dev->GetImmediateContext(&g_ctx11);
+    if (FAILED(g_ctx11->QueryInterface(IID_PPV_ARGS(&g_ctx11_1)))) g_ctx11_1 = nullptr;
+    menuInit(nullptr, nullptr, wnd, height);
 }
 
 void menuReleaseTargets() {
@@ -1022,7 +1220,8 @@ bool compose(IDXGISwapChain3* sc, UINT index, bool layer) {
             pad::stickPast(g_padView.ly, 1) || pad::stickPast(g_padView.ly, -1))
             g_padUsed = true;
     } else if (g_padRelease) { pad::releasePad(io); g_padRelease = false; }
-    ImGui_ImplDX12_NewFrame();
+    if (g_native) ImGui_ImplDX11_NewFrame();
+    else ImGui_ImplDX12_NewFrame();
     ImGui::NewFrame();
     if (g_counter) drawCounter();
     if (g_open) drawMenu();
@@ -1039,6 +1238,7 @@ bool compose(IDXGISwapChain3* sc, UINT index, bool layer) {
     box.left = std::max(box.left, 0L); box.top = std::max(box.top, 0L);
     box.right = std::min(box.right, LONG(g_w)); box.bottom = std::min(box.bottom, LONG(g_h));
     if (box.right <= box.left || box.bottom <= box.top) return false;
+    if (g_native) { g_nativeBox = box; return true; }  // menuNativeFrame draws it through nativeFrame
 
     ID3D12Resource* bb = nullptr;
     if (layer) (bb = g_layer)->AddRef();
@@ -1093,6 +1293,20 @@ void menuFrame(IDXGISwapChain3* sc, UINT index) {
     if (drew && layer) { fsrFgUi(g_layer); g_layered = true; }
     else if (g_layered) { fsrFgUi(nullptr); g_layered = false; }
 }
+
+// Natively, before the game's Present: the counter and menu into the game's back buffer. Nothing at all (no buffer
+// acquired, nothing bound) when neither is shown.
+void menuNativeFrame(IDXGISwapChain* sc) {
+    if (!g_ready || !g_native) return;
+    pollToggle();
+    DXGI_SWAP_CHAIN_DESC d = {};
+    if (SUCCEEDED(sc->GetDesc(&d)) && d.BufferDesc.Width && d.BufferDesc.Height) { g_w = d.BufferDesc.Width; g_h = d.BufferDesc.Height; }
+    const bool wanted = (g_counter || g_open || g_padRelease) && compose(nullptr, 0, false);
+    D3D11FrameOps ops{ sc };
+    if (nativeFrame(ops, wanted, g_nativeBuilt) == kNfDrawn) ++g_nativeDrawn;
+}
+void menuNativeStats(unsigned* drawn, unsigned* acquired) { *drawn = g_nativeDrawn; *acquired = g_nativeAcquired; }
+bool g_nativeDrawing;
 
 // After Present: `shown` = frames actually presented for this rendered frame (2 at 2x frame generation).
 void inputThreads(DWORD* dinput, DWORD* xinput, unsigned* diPolls) { *dinput = g_diTid; *xinput = g_xiTid; *diPolls = g_diPolls.exchange(0); }

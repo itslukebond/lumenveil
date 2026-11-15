@@ -104,7 +104,7 @@ template <class F> static F orig(void* obj, int idx) {
 static void noteUiDraw(ID3D11DeviceContext* ctx);
 #define CTX_HOOK(idx, name, compute, sig, args, la, lb)                                         \
     static void STDMETHODCALLTYPE hk_##name sig {                                               \
-        if (!compute) { noteUiDraw(ctx); gameSharpenCount(ctx, idx); }                          \
+        if (!compute && !g_nativeDrawing) { noteUiDraw(ctx); gameSharpenCount(ctx, idx); }      \
         orig<void(STDMETHODCALLTYPE*) sig>(ctx, idx) args;                                      \
     }
 CTX_HOOK(20, DrawIndexedInstanced, false, (ID3D11DeviceContext* ctx, UINT c, UINT i, UINT s, INT b, UINT si), (ctx, c, i, s, b, si), c, i)
@@ -292,6 +292,7 @@ static std::unordered_map<ID3D11SamplerState*, ID3D11SamplerState*> g_biased;  /
 static float g_smpBias;
 static void STDMETHODCALLTYPE hk_PSSetSamplers(ID3D11DeviceContext* ctx, UINT start, UINT n, ID3D11SamplerState* const* s) {
     using F = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*, UINT, UINT, ID3D11SamplerState* const*);
+    if (g_nativeDrawing) return orig<F>(ctx, 10)(ctx, start, n, s);
     const DlssInfo di = dlssInfo();
     const float bias = dlssEnabled() && di.inW && di.outW > di.inW ? std::log2(float(di.inW) / float(di.outW)) : 0.f;
     if (bias == 0.f || !s || n > 16) return orig<F>(ctx, 10)(ctx, start, n, s);
@@ -325,6 +326,7 @@ static void STDMETHODCALLTYPE hk_PSSetSamplers(ID3D11DeviceContext* ctx, UINT st
 }
 
 static void STDMETHODCALLTYPE hk_PSSetShader(ID3D11DeviceContext* ctx, ID3D11PixelShader* ps, ID3D11ClassInstance* const* ci, UINT n) {
+    if (g_nativeDrawing) return orig<void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*, ID3D11PixelShader*, ID3D11ClassInstance* const*, UINT)>(ctx, 9)(ctx, ps, ci, n);
     if (ctx == g_imm) g_immPS = ps;
     if (ps && ps == g_gameSharpPS) ++(ctx == g_imm ? g_gsBinds : g_gsOtherBinds);
     if (g_uiFix && ps)
@@ -621,6 +623,7 @@ static void gameSharpenDraw(ID3D11DeviceContext* ctx, UINT c, UINT s) {
 }
 
 static void STDMETHODCALLTYPE hk_Draw(ID3D11DeviceContext* ctx, UINT c, UINT s) {
+    if (g_nativeDrawing) return orig<PFN_Draw>(ctx, 13)(ctx, c, s);
     if (ctx == g_imm) p12FirstDraw();
     noteUiDraw(ctx);
     if (ctx == g_imm && g_immPS && g_immPS == g_gameSharpPS) {
@@ -702,7 +705,7 @@ bool cbShadow(ID3D11Buffer* b, TaaCB* out) {
 
 static HRESULT STDMETHODCALLTYPE hk_Map(ID3D11DeviceContext* ctx, ID3D11Resource* r, UINT sub, D3D11_MAP type, UINT fl, D3D11_MAPPED_SUBRESOURCE* m) {
     HRESULT hr = orig<HRESULT(STDMETHODCALLTYPE*)(ID3D11DeviceContext*, ID3D11Resource*, UINT, D3D11_MAP, UINT, D3D11_MAPPED_SUBRESOURCE*)>(ctx, 14)(ctx, r, sub, type, fl, m);
-    if (ctx == g_imm && SUCCEEDED(hr) && m && type == D3D11_MAP_WRITE_DISCARD && is256CB(r)) {
+    if (ctx == g_imm && !g_nativeDrawing && SUCCEEDED(hr) && m && type == D3D11_MAP_WRITE_DISCARD && is256CB(r)) {
         std::lock_guard<std::mutex> lk(g_cbMx);
         for (auto& p : g_pend)
             if (!p.r) { p.r = r; p.real = m->pData; m->pData = p.scratch; break; }  // all busy: game writes the real mapping
@@ -710,7 +713,7 @@ static HRESULT STDMETHODCALLTYPE hk_Map(ID3D11DeviceContext* ctx, ID3D11Resource
     return hr;
 }
 static void STDMETHODCALLTYPE hk_Unmap(ID3D11DeviceContext* ctx, ID3D11Resource* r, UINT sub) {
-    if (ctx == g_imm) {
+    if (ctx == g_imm && !g_nativeDrawing) {
         PendingCB* hit = nullptr;
         {
             std::lock_guard<std::mutex> lk(g_cbMx);
@@ -726,7 +729,7 @@ static void STDMETHODCALLTYPE hk_Unmap(ID3D11DeviceContext* ctx, ID3D11Resource*
     orig<void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*, ID3D11Resource*, UINT)>(ctx, 15)(ctx, r, sub);
 }
 static void STDMETHODCALLTYPE hk_UpdateSubresource(ID3D11DeviceContext* ctx, ID3D11Resource* r, UINT sub, const D3D11_BOX* box, const void* src, UINT rp, UINT dp) {
-    if (ctx == g_imm && src && !box && is256CB(r)) noteCB(r, src);
+    if (ctx == g_imm && !g_nativeDrawing && src && !box && is256CB(r)) noteCB(r, src);
     orig<void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*, ID3D11Resource*, UINT, const D3D11_BOX*, const void*, UINT, UINT)>(ctx, 48)(ctx, r, sub, box, src, rp, dp);
 }
 
@@ -905,13 +908,13 @@ static void applyViewports(ID3D11DeviceContext* ctx) {
 }
 
 static void STDMETHODCALLTYPE hk_RSSetViewports(ID3D11DeviceContext* ctx, UINT n, const D3D11_VIEWPORT* vp) {
-    if (ctx != g_imm || n > 16) return orig<PFN_RSSetViewports>(ctx, 44)(ctx, n, vp);
+    if (ctx != g_imm || g_nativeDrawing || n > 16) return orig<PFN_RSSetViewports>(ctx, 44)(ctx, n, vp);
     g_nvp = n; if (n) memcpy(g_vp, vp, sizeof(D3D11_VIEWPORT) * n);
     if (!g_maskBound) return orig<PFN_RSSetViewports>(ctx, 44)(ctx, n, vp);
     applyViewports(ctx);
 }
 static void STDMETHODCALLTYPE hk_RSSetScissorRects(ID3D11DeviceContext* ctx, UINT n, const D3D11_RECT* r) {
-    if (ctx != g_imm || n > 16) return orig<PFN_RSSetScissor>(ctx, 45)(ctx, n, r);
+    if (ctx != g_imm || g_nativeDrawing || n > 16) return orig<PFN_RSSetScissor>(ctx, 45)(ctx, n, r);
     g_nsc = n; if (n) memcpy(g_sc, r, sizeof(D3D11_RECT) * n);
     if (!g_maskBound) return orig<PFN_RSSetScissor>(ctx, 45)(ctx, n, r);
     applyViewports(ctx);
@@ -919,7 +922,7 @@ static void STDMETHODCALLTYPE hk_RSSetScissorRects(ID3D11DeviceContext* ctx, UIN
 
 static void STDMETHODCALLTYPE hk_OMSetRenderTargets(ID3D11DeviceContext* ctx, UINT n, ID3D11RenderTargetView* const* rtv, ID3D11DepthStencilView* dsv) {
     using F = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*, UINT, ID3D11RenderTargetView* const*, ID3D11DepthStencilView*);
-    if (ctx != g_imm || !g_maskRTV || n > 8) return orig<F>(ctx, 33)(ctx, n, rtv, dsv);
+    if (ctx != g_imm || g_nativeDrawing || !g_maskRTV || n > 8) return orig<F>(ctx, 33)(ctx, n, rtv, dsv);
     ID3D11RenderTargetView* v[8]; bool bound = false;
     for (UINT i = 0; i < n; ++i) {
         v[i] = rtv[i];
@@ -931,6 +934,7 @@ static void STDMETHODCALLTYPE hk_OMSetRenderTargets(ID3D11DeviceContext* ctx, UI
 
 static void STDMETHODCALLTYPE hk_PSSetShaderResources(ID3D11DeviceContext* ctx, UINT start, UINT n, ID3D11ShaderResourceView* const* srv) {
     using F = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*, UINT, UINT, ID3D11ShaderResourceView* const*);
+    if (g_nativeDrawing) return orig<F>(ctx, 8)(ctx, start, n, srv);  // the native menu's own views, and the game's put back
     if (g_uiRepl < 0) {
         g_uiRepl = GetFileAttributesW(path(L"ffxv_dlss\\ui").c_str()) != INVALID_FILE_ATTRIBUTES;
         logf("ui: replacement folder ffxv_dlss\\ui %s", g_uiRepl ? "found" : "absent");
@@ -953,7 +957,7 @@ static void STDMETHODCALLTYPE hk_PSSetShaderResources(ID3D11DeviceContext* ctx, 
 
 static void STDMETHODCALLTYPE hk_ClearRenderTargetView(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, const FLOAT c[4]) {
     using F = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*, ID3D11RenderTargetView*, const FLOAT*);
-    if (ctx == g_imm && g_uiFix && rtv && rtv == g_maskRTV) rtv = g_bigRTV;
+    if (ctx == g_imm && !g_nativeDrawing && g_uiFix && rtv && rtv == g_maskRTV) rtv = g_bigRTV;
     orig<F>(ctx, 50)(ctx, rtv, c);
 }
 
@@ -977,6 +981,7 @@ static void detectMask(ID3D11DeviceContext* ctx) {
 }
 
 static void STDMETHODCALLTYPE hk_DrawIndexed(ID3D11DeviceContext* ctx, UINT c, UINT s, INT b) {
+    if (g_nativeDrawing) return orig<PFN_DrawIndexed>(ctx, 12)(ctx, c, s, b);
     if (ctx == g_imm) p12FirstDraw();
     if (ctx == g_imm && !g_maskRTV && g_maskPS && g_immPS == g_maskPS) detectMask(ctx);
     noteUiDraw(ctx);
@@ -1132,13 +1137,25 @@ static void onPresent(IDXGISwapChain* sc) {
         }
     }
 }
+// Native presentation: the game's own Present with the game's interval, the menu drawn just before it. A Present with
+// the tearing flag that DXGI refuses goes again without it, and the flag is not added again.
+template <class F> static HRESULT nativePresent(IDXGISwapChain* sc, UINT si, UINT f, F present) {
+    onPresent(sc);
+    const UINT fl = p12NativeBefore(sc, si, f);
+    HRESULT hr = present(fl);
+    if (hr == DXGI_ERROR_INVALID_CALL && fl != f) { p12NativeTearingRefused(); hr = present(f); }
+    p12NativeAfter(sc, f);
+    return hr;
+}
 static HRESULT STDMETHODCALLTYPE hk_Present(IDXGISwapChain* sc, UINT si, UINT f) {
     if (p12Owns(sc)) return o_Present(sc, si, f);
+    if (p12IsNative(sc)) return nativePresent(sc, si, f, [&](UINT fl) { return o_Present(sc, si, fl); });
     onPresent(sc);
     return p12IsGame(sc) ? p12Present(si, f) : o_Present(sc, si, f);
 }
 static HRESULT STDMETHODCALLTYPE hk_Present1(IDXGISwapChain1* sc, UINT si, UINT f, const DXGI_PRESENT_PARAMETERS* p) {
     if (p12Owns(sc)) return o_Present1(sc, si, f, p);
+    if (p12IsNative(sc)) return nativePresent(sc, si, f, [&](UINT fl) { return o_Present1(sc, si, fl, p); });
     onPresent(sc);
     return p12IsGame(sc) ? p12Present(si, f) : o_Present1(sc, si, f, p);
 }
@@ -1205,11 +1222,18 @@ static void hookWrapperView(IDXGISwapChain* sc) {
     });
 }
 
+// Set by a creation hook for the game's swap chain on a native launch, read by createdBy: natively the game's swap chain
+// stays on its window and is presented by its own Present (present12.cpp, present_mode.h).
+static bool s_nativeCreate, s_nativeTear;
+static bool flipModel(DXGI_SWAP_EFFECT e) { return e == DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL || e == DXGI_SWAP_EFFECT_FLIP_DISCARD; }
+
 // [d3d12] present=1: the game's swapchain goes on a hidden window and ours takes the real one (present12.cpp).
 static void createdBy(IDXGISwapChain* sc, bool p12, bool viaWrapper) {
     hookSwapChain(sc);  // our own D3D12 swapchain never gets here: p12Init creates it through the original function
     if (p12) p12Attach(sc);
     if (p12 && viaWrapper) hookWrapperView(sc);
+    if (s_nativeCreate) p12NativeAttach(sc, s_nativeTear);
+    s_nativeCreate = false;
 }
 static HRESULT STDMETHODCALLTYPE hk_CreateSC(IDXGIFactory* f, IUnknown* d, DXGI_SWAP_CHAIN_DESC* desc, IDXGISwapChain** sc) {
     if (p12Busy()) return o_CreateSC(f, d, desc, sc);  // Streamline creating its own swapchain inside p12Init
@@ -1225,9 +1249,15 @@ static HRESULT STDMETHODCALLTYPE hk_CreateSC(IDXGIFactory* f, IUnknown* d, DXGI_
         f2->Release();
         if (hidden) dd.OutputWindow = hidden;
     }
+    // natively on Windows the game's flip-model swap chain gets the tearing flag; refused: made without it, never again
+    s_nativeCreate = game && desc && p12Native();
+    s_nativeTear = s_nativeCreate && p12NativeTearing() && flipModel(dd.SwapEffect);
+    if (s_nativeTear) dd.Flags |= DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
     HRESULT hr = o_CreateSC(f, d, desc ? &dd : nullptr, sc);
+    if (s_nativeTear && FAILED(hr)) { s_nativeTear = false; p12NativeTearingRefused(); hr = o_CreateSC(f, d, desc, sc); }
     if (hidden && FAILED(hr)) { p12Abort(); hidden = nullptr; hr = o_CreateSC(f, d, desc, sc); }
     if (SUCCEEDED(hr) && sc && *sc) createdBy(*sc, hidden != nullptr, viaWrapper);
+    s_nativeCreate = false;
     return hr;
 }
 static HRESULT STDMETHODCALLTYPE hk_CreateSCHwnd(IDXGIFactory2* f, IUnknown* d, HWND w, const DXGI_SWAP_CHAIN_DESC1* desc,
@@ -1236,9 +1266,16 @@ static HRESULT STDMETHODCALLTYPE hk_CreateSCHwnd(IDXGIFactory2* f, IUnknown* d, 
     bool viaWrapper = false;
     bool game = takeAsGame(_ReturnAddress(), d, w, &viaWrapper);
     HWND hidden = game && desc && p12Enabled() ? p12Init(d, f, o_CreateSCHwnd, w, desc) : nullptr;
-    HRESULT hr = o_CreateSCHwnd(f, d, hidden ? hidden : w, desc, fs, o, sc);
+    // natively on Windows the game's flip-model swap chain gets the tearing flag; refused: made without it, never again
+    DXGI_SWAP_CHAIN_DESC1 nd = desc ? *desc : DXGI_SWAP_CHAIN_DESC1{};
+    s_nativeCreate = game && desc && p12Native();
+    s_nativeTear = s_nativeCreate && p12NativeTearing() && flipModel(nd.SwapEffect);
+    if (s_nativeTear) nd.Flags |= DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
+    HRESULT hr = o_CreateSCHwnd(f, d, hidden ? hidden : w, s_nativeTear ? &nd : desc, fs, o, sc);
+    if (s_nativeTear && FAILED(hr)) { s_nativeTear = false; p12NativeTearingRefused(); hr = o_CreateSCHwnd(f, d, w, desc, fs, o, sc); }
     if (hidden && FAILED(hr)) { p12Abort(); hidden = nullptr; hr = o_CreateSCHwnd(f, d, w, desc, fs, o, sc); }
     if (SUCCEEDED(hr) && sc && *sc) createdBy(*sc, hidden != nullptr, viaWrapper);
+    s_nativeCreate = false;
     return hr;
 }
 

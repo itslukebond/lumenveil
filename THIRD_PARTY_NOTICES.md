@@ -7,7 +7,7 @@
 | Dear ImGui (with its bundled stb_truetype, public domain / MIT) | Insert menu and fps counter; rasterising the 2x HUD letters | MIT (below) |
 | MinHook | Function hooks | BSD 2-Clause (below) |
 | AMD FidelityFX SDK 2.4.0 API headers | AMD FSR upscaling and frame generation (headers in `third_party/fidelityfx`, compiled into `dxgi.dll`) | MIT (below) |
-| AMD Anti-Lag 2 SDK header | AMD Radeon Anti-Lag 2 (`third_party/amd-antilag2`, compiled into `dxgi.dll`; AMD's driver provides the runtime) | MIT (below) |
+| AMD Anti-Lag 2 SDK headers | AMD Radeon Anti-Lag 2 (`third_party/amd-antilag2`, compiled into `dxgi.dll`; AMD's driver provides the runtime) | MIT (below) |
 | Intel XeSS SDK 3.0.2 | Intel XeSS upscaling, frame generation and Xe Low Latency (headers from the `third_party/xess` submodule at build time; nothing of Intel's is copied into this repository) | Intel Simplified Software License (https://github.com/intel/xess/blob/v3.0.2/LICENSE.txt). Not covered by this project's MIT licence |
 | TeX Gyre Adventor | Menu font and the 2x HUD letters (`third_party/tex-gyre-adventor`, shipped unmodified) | GUST Font License (`GUST-FONT-LICENSE.txt`) |
 
@@ -193,7 +193,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 ```
 
-## AMD Anti-Lag 2 SDK header (MIT)
+## AMD Anti-Lag 2 SDK headers (MIT)
 
 ```
 This file is part of the Anti-Lag 2 SDK.
