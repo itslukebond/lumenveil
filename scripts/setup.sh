@@ -1139,8 +1139,15 @@ is_reshade() { # is_reshade FILE: a 64-bit DLL whose ProductName is ReShade (any
 }
 install_files() {
     local f err files=()
-    if [ ! -d "$payload" ]; then
-        note "The release's game folder is missing. Extract the whole zip, then run this again."
+    # The source code download (GitHub's Code button) has the scripts but not the built mod in game/.
+    if [ ! -f "$payload/dxgi.dll" ]; then
+        if [ -d "$release/src" ]; then
+            note "This folder is Lumenveil's source code, not the mod."
+        else
+            note "The release's game folder is missing or has no dxgi.dll."
+        fi
+        note 'Download lumenveil-<version>.zip from the Assets list on the Releases page of the'
+        note "mod's GitHub page, then extract the whole zip and run the installer from the new folder."
         return 4
     fi
     mapfile -t files < <(cd "$payload" && find . -type f -printf '%P\n' | LC_ALL=C sort)

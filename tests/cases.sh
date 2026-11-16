@@ -2099,6 +2099,33 @@ EOF
     done
 }
 
+# ---- T42 the wrong download: the source code, or a game folder with no dxgi.dll, installs nothing ---------------------------
+case_t42() {
+    local i=$1 d before
+    # a release whose game folder is empty (a player made one by hand)
+    mkcase "t42a-$i"
+    d=$C/rel-empty
+    cp -r "$REL" "$d" && chmod -R u+w "$d" && rm -rf "$d/game" && mkdir "$d/game"
+    before=$(snap "$GAME")
+    run "$i" install noprompt rel="$d"
+    t "T42 $i empty game folder: refused (exit 4)" eq "$RC" 4
+    t "T42 $i empty game folder: game folder unchanged" eq "$(snap "$GAME")" "$before"
+    t "T42 $i empty game folder: says the mod's dxgi.dll is missing" has "dxgi.dll"
+    t "T42 $i empty game folder: points to the release zip" has "Releases page of the"
+    # the source code download (GitHub's Code button): the scripts and the source, no game folder
+    mkcase "t42b-$i"
+    d=$C/lumenveil-main
+    cp -r "$REL" "$d" && chmod -R u+w "$d" && rm -rf "$d/game" &&
+        mkdir -p "$d/src" "$d/tests" && printf 'project(stand-in)\n' > "$d/CMakeLists.txt" && printf '// stand-in\n' > "$d/src/main.cpp"
+    before=$(snap "$GAME")
+    run "$i" install noprompt rel="$d"
+    t "T42 $i source download: refused (exit 4)" eq "$RC" 4
+    t "T42 $i source download: game folder unchanged" eq "$(snap "$GAME")" "$before"
+    t "T42 $i source download: says it is the source code" has "source code"
+    t "T42 $i source download: points to the release zip" has "Releases page of the"
+    t "T42 $i source download: names the zip to download" has "lumenveil-<version>.zip"
+}
+
 # ---- run -----------------------------------------------------------------------------------------------------------------------
 REL=$T/release
 mkrelease "$REL" || no "release folder could not be made (scripts missing?)"
@@ -2116,7 +2143,7 @@ groups=${*:-sh ps static package stress}
 for g in $groups; do
     case $g in
         sh | ps)
-            for c in t1 t2 t3 t4 t5 t6 t7 t9 t10 t11 t12 t14 t20 t21 t22 t24 t25 t26 t27 t28 t29 t30 t31 t32 t33 t34 t35 t36 t37 t38 t40 t41; do
+            for c in t1 t2 t3 t4 t5 t6 t7 t9 t10 t11 t12 t14 t20 t21 t22 t24 t25 t26 t27 t28 t29 t30 t31 t32 t33 t34 t35 t36 t37 t38 t40 t41 t42; do
                 "case_$c" "$g"
             done
             case_t12b "$g"

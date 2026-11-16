@@ -1426,8 +1426,15 @@ function Test-IsReShade([string]$Path) {
     return $i.Bad -eq '' -and $i.Product.Trim().ToLowerInvariant() -eq 'reshade'
 }
 function Install-ModFiles {
-    if (-not (Test-Path -LiteralPath $Payload -PathType Container)) {
-        Write-Note "The release's game folder is missing. Extract the whole zip, then run this again."
+    # The source code download (GitHub's Code button) has the scripts but not the built mod in game/.
+    if (-not (Test-Path -LiteralPath (Join-Path $Payload 'dxgi.dll') -PathType Leaf)) {
+        if (Test-Path -LiteralPath (Join-Path $Release 'src') -PathType Container) {
+            Write-Note "This folder is Lumenveil's source code, not the mod."
+        } else {
+            Write-Note "The release's game folder is missing or has no dxgi.dll."
+        }
+        Write-Note 'Download lumenveil-<version>.zip from the Assets list on the Releases page of the'
+        Write-Note "mod's GitHub page, then extract the whole zip and run the installer from the new folder."
         return 4
     }
     $root = [System.IO.Path]::GetFullPath($Payload).TrimEnd('\', '/')
