@@ -179,8 +179,7 @@ elsewhere. On another handheld, such as a ROG Ally or Legion Go, pick Portable; 
 The menu switches at once and remembers your pick.
 
 <p align="center">
-  <img src="docs/images/menu.png" alt="The mod's menu in game on its Upscaling page: Auto picks DLSS, Performance mode, frame generation at 2x" width="420">
-  <img src="docs/images/menu-portable.png" alt="The same page in the Portable layout: bigger text and touch controls, with L1 and R1 to change page" width="420">
+  <img src="docs/images/menu.png" alt="The mod's menu in game on its Upscaling page: Auto picks DLSS, Performance mode, frame generation at 2x" width="48%"> <img src="docs/images/menu-portable.png" alt="The same page in the Portable layout: bigger text and touch controls, with L1 and R1 to change page" width="48%">
 </p>
 
 | Setting | What it does |
