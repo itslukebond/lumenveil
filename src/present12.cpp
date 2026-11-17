@@ -14,6 +14,7 @@
 #include "colour_space.h"
 #include "vsync_rules.h"
 #include "present_mode.h"
+#include "fg_support.h"
 #include <d3d11_4.h>
 #include <d3d12.h>
 #include <dxgi1_6.h>
@@ -49,6 +50,11 @@ SL_FORWARD(slGetFeatureFunction, (sl::Feature f, const char* n, void*& p), (f, n
 SL_FORWARD(slGetNewFrameToken, (sl::FrameToken*& t, const uint32_t* i), (t, i))
 SL_FORWARD(slSetConstants, (const sl::Constants& c, const sl::FrameToken& t, const sl::ViewportHandle& v), (c, t, v))
 SL_FORWARD(slSetTagForFrame, (const sl::FrameToken& t, const sl::ViewportHandle& v, const sl::ResourceTag* r, uint32_t n, sl::CommandBuffer* c), (t, v, r, n, c))
+SL_FORWARD(slIsFeatureSupported, (sl::Feature f, const sl::AdapterInfo& a), (f, a))
+SL_FORWARD(slGetFeatureRequirements, (sl::Feature f, sl::FeatureRequirements& r), (f, r))
+static_assert(int(sl::Result::eErrorDriverOutOfDate) == fg_support::kDriverOutOfDate && int(sl::Result::eErrorOSOutOfDate) == fg_support::kOSOutOfDate &&
+              int(sl::Result::eErrorOSDisabledHWS) == fg_support::kOSDisabledHWS && int(sl::Result::eErrorNoSupportedAdapterFound) == fg_support::kNoSupportedAdapter &&
+              int(sl::Result::eErrorAdapterNotSupported) == fg_support::kAdapterNotSupported && int(sl::Result::eOk) == fg_support::kOk, "fg_support.h values");
 
 namespace {
 constexpr UINT kBuffers = 3;
@@ -184,16 +190,20 @@ bool createTargets() {
     D3D12_HEAP_PROPERTIES hp = { D3D12_HEAP_TYPE_DEFAULT };
     D3D12_RESOURCE_DESC rd = { D3D12_RESOURCE_DIMENSION_TEXTURE2D, 0, d.Width, d.Height, 1, 1, d.Format, {1, 0},
                                D3D12_TEXTURE_LAYOUT_UNKNOWN, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET };
+    // step names the call that failed, for the log (a player's log is the only way to see which one refuses)
+    const char* step = "shared texture";
     HRESULT hr = g_d3d12->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_SHARED, &rd, D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&g_shared12));
     HANDLE h = nullptr;
-    if (SUCCEEDED(hr)) hr = g_d3d12->CreateSharedHandle(g_shared12, nullptr, GENERIC_ALL, nullptr, &h);
-    if (SUCCEEDED(hr)) hr = g_dev11->OpenSharedResource1(h, IID_PPV_ARGS(&g_shared11));
+    if (SUCCEEDED(hr)) { step = "share handle"; hr = g_d3d12->CreateSharedHandle(g_shared12, nullptr, GENERIC_ALL, nullptr, &h); }
+    if (SUCCEEDED(hr)) { step = "open in D3D11"; hr = g_dev11->OpenSharedResource1(h, IID_PPV_ARGS(&g_shared11)); }
     if (h) CloseHandle(h);
-    if (SUCCEEDED(hr)) hr = g_alloc->Reset();
+    if (SUCCEEDED(hr)) { step = "allocator reset"; hr = g_alloc->Reset(); }
+    int buf = -1;  // the back buffer the step was for, -1 before the loop
     for (UINT i = 0; SUCCEEDED(hr) && i < kBuffers; ++i) {
         ID3D12Resource* bb = nullptr;
+        buf = int(i); step = "back buffer";
         hr = g_sc->GetBuffer(i, IID_PPV_ARGS(&bb));
-        if (SUCCEEDED(hr)) hr = g_d3d12->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, g_alloc, nullptr, IID_PPV_ARGS(&g_cl[i]));
+        if (SUCCEEDED(hr)) { step = "command list"; hr = g_d3d12->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, g_alloc, nullptr, IID_PPV_ARGS(&g_cl[i])); }
         if (SUCCEEDED(hr)) {
             D3D12_RESOURCE_BARRIER b = {};
             b.Transition = { bb, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_COPY_DEST };
@@ -201,11 +211,16 @@ bool createTargets() {
             g_cl[i]->CopyResource(bb, g_shared12);  // shared texture is promoted from COMMON and decays back
             std::swap(b.Transition.StateBefore, b.Transition.StateAfter);
             g_cl[i]->ResourceBarrier(1, &b);
+            step = "command list close";
             hr = g_cl[i]->Close();
         }
         release(bb);  // the swapchain keeps it alive; ResizeBuffers needs our references gone
     }
     logf("d3d12: present targets %ux%u fmt %u: %08x", d.Width, d.Height, d.Format, hr);
+    if (FAILED(hr)) {
+        if (buf >= 0) logf("d3d12: present targets failed at %s %d: %08x", step, buf, hr);
+        else logf("d3d12: present targets failed at %s: %08x", step, hr);
+    }
     if (SUCCEEDED(hr)) refreshEncoding();
     if (SUCCEEDED(hr)) menuTargets(g_sc);  // no-op until menuInit
     return SUCCEEDED(hr);
@@ -224,6 +239,7 @@ sl::DLSSGOptions g_fgOpts;
 FgSettings g_set;                   // [fg] in the ini; the menu changes it live
 FgStatus g_status;                  // what this GPU/driver supports, from DLSS-G's state
 bool g_fgOn;
+unsigned g_onFrames;                // rendered frames in the current 500-frame window with frame generation on
 int g_validRun, g_invalidRun;       // hysteresis, so a skipped DLSS frame doesn't toggle FG
 FgGate g_gate;                      // FG waits until the game is past its start-up scene (fg_gate.h)
 // Under Wine (Proton), switching DLSS-G back on while the game's first frames after a load are still on the GPU can
@@ -277,6 +293,25 @@ bool fgStart() {
     sl::Result r = slInit(p, sl::kSDKVersion);
     logf("fg: slInit %d", (int)r);
     return r == sl::Result::eOk;
+}
+
+// Whether Streamline can run DLSS frame generation on this adapter, and if not why (fg_support.h), with the OS and driver
+// versions it detected and needs: logged once after slInit. Only reported: frame generation is not switched off on it.
+void fgSupportCheck(const LUID& luid) {
+    sl::AdapterInfo info;
+    info.deviceLUID = (uint8_t*)&luid; info.deviceLUIDSizeInBytes = sizeof luid;
+    const sl::Result r = slIsFeatureSupported(sl::kFeatureDLSS_G, info);
+    g_status.slSupport = int(r);
+    if (r == sl::Result::eOk) logf("fg: DLSS frame generation supported on this PC");
+    else if (const char* why = fg_support::reason(int(r))) logf("fg: DLSS frame generation not supported: %s (Streamline result %d)", why, int(r));
+    else logf("fg: DLSS frame generation not supported (Streamline result %d)", int(r));
+    sl::FeatureRequirements q;
+    const sl::Result qr = slGetFeatureRequirements(sl::kFeatureDLSS_G, q);
+    if (qr != sl::Result::eOk) { logf("fg: frame generation requirements unavailable (Streamline result %d)", int(qr)); return; }
+    logf("fg: frame generation requirements: flags %x, OS %u.%u.%u (needs %u.%u.%u), driver %u.%u.%u (needs %u.%u.%u)", (unsigned)q.flags,
+         q.osVersionDetected.major, q.osVersionDetected.minor, q.osVersionDetected.build, q.osVersionRequired.major, q.osVersionRequired.minor,
+         q.osVersionRequired.build, q.driverVersionDetected.major, q.driverVersionDetected.minor, q.driverVersionDetected.build,
+         q.driverVersionRequired.major, q.driverVersionRequired.minor, q.driverVersionRequired.build);
 }
 
 sl::float4x4 rows(const float* m) {
@@ -467,6 +502,7 @@ unsigned fgAfterPresent() {
             g_d3d12Queue->Wait((ID3D12Fence*)st.inputsProcessingCompletionFence, st.lastPresentInputsProcessingCompletionFenceValue);
     }
     g_d3d12Queue->Signal(g_fence, g_inputsFree = ++g_fenceVal);
+    if (g_fgOn) ++g_onFrames;
     if (++g_rendered == 500) {
         dlssgVersion();  // logs the frame generation file and its folder once it has loaded, menu open or not
         // Reflex sleeps here, on the present thread: only right if the game also polls input on it
@@ -476,8 +512,13 @@ unsigned fgAfterPresent() {
              GetCurrentThreadId(), di, polls / n, xi);
         logf("fg: present-thread us/frame: copy %.0f menu %.0f fgset %.0f Present %.0f fgstate %.0f reflex sleep %.0f | game %.0f",
              g_tUs[0] / n, g_tUs[1] / n, g_tUs[2] / n, g_tUs[3] / n, (g_tUs[4] - g_tUs[5]) / n, g_tUs[5] / n, g_tUs[6] / n);
+        static bool toldNone;  // once per launch: every window after it would say the same
+        if (!toldNone && fg_support::noneGenerated(g_onFrames, g_presented, g_rendered)) {
+            toldNone = true;
+            logf("fg: DLSS frame generation is on but generated no frames in the last %u", g_rendered);
+        }
         std::fill(std::begin(g_tUs), std::end(g_tUs), 0.0);
-        g_rendered = g_presented = 0;
+        g_rendered = g_presented = g_onFrames = 0;
     }
     // next frame starts here
     ++g_frameIndex;
@@ -848,7 +889,7 @@ HWND p12Init(IUnknown* dev, IDXGIFactory2* f, PFN_CreateSCHwnd create, HWND wnd,
     if (SUCCEEDED(hr)) { hr = dd->GetAdapter(&ad); dd->Release(); }
     if (FAILED(hr)) { fail("D3D11 device interfaces", hr); return nullptr; }
 
-    DXGI_ADAPTER_DESC adesc;
+    DXGI_ADAPTER_DESC adesc = {};
     if (SUCCEEDED(ad->GetDesc(&adesc))) g_vendor = adesc.VendorId;
     g_wine = GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "wine_get_version") != nullptr;
     g_set = { ini(L"fg", L"enable", 1), ini(L"fg", L"frames", 0), ini(L"fg", L"target", 240), ini(L"fg", L"limit", -1), ini(L"fg", L"reflex", 1), ini(L"fg", L"antilag", 0) };
@@ -858,7 +899,7 @@ HWND p12Init(IUnknown* dev, IDXGIFactory2* f, PFN_CreateSCHwnd create, HWND wnd,
     const bool dlssg = GetFileAttributesW(path(L"ffxv_dlss\\streamline\\nvngx_dlssg.dll").c_str()) != INVALID_FILE_ATTRIBUTES;
     const int backend = fgPickBackend(setting, g_vendor, dlssg, xessFgPresent());
     switch (backend) {
-    case 0: g_fg = fgStart(); break;                              // Streamline loads only on NVIDIA, or when chosen by hand
+    case 0: g_fg = fgStart(); if (g_fg) fgSupportCheck(adesc.AdapterLuid); break;  // Streamline loads only on NVIDIA, or when chosen by hand
     case 1: g_fsrFg = g_set.enable && fsrLoad(); break;           // AMD's swapchain replaces ours: decided at launch
     case 2: g_xessFg = g_set.enable && xessFgPresent(); break;    // Intel's too; its DLLs load when the swapchain is made
     default: break;

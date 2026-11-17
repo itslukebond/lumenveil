@@ -1281,6 +1281,12 @@ using PFN_CreateSC = HRESULT(STDMETHODCALLTYPE*)(IDXGIFactory*, IUnknown*, DXGI_
 static PFN_CreateSC o_CreateSC; static PFN_CreateSCHwnd o_CreateSCHwnd;
 static bool calledByGame(void* ret);
 static bool takeAsGame(void* ret, IUnknown* device, HWND w, bool* viaWrapper);
+static void noteNotTaken(void* ret);
+static void notePresentOff();
+// Creation hooks running on this thread: the system DXGI's own nested creation inside ours (DXVK's CreateSwapChain calls
+// CreateSwapChainForHwnd) is not a separate swap chain to report.
+static thread_local int s_createDepth;
+struct CreateDepth { CreateDepth() { ++s_createDepth; } ~CreateDepth() { --s_createDepth; } };
 
 // A DXGI wrapper (OptiScaler, Special K) keeps the game's swap chain and reads its window from it: while our presenter
 // has it, GetDesc and GetHwnd report the game's own window, as hk_GetDesc does for ReShade.
@@ -1322,6 +1328,9 @@ static HRESULT STDMETHODCALLTYPE hk_CreateSC(IDXGIFactory* f, IUnknown* d, DXGI_
     if (p12Busy()) return o_CreateSC(f, d, desc, sc);  // Streamline creating its own swapchain inside p12Init
     bool viaWrapper = false;
     bool game = takeAsGame(_ReturnAddress(), d, desc ? desc->OutputWindow : nullptr, &viaWrapper);
+    if (!game) noteNotTaken(_ReturnAddress());
+    else if (!p12Enabled()) notePresentOff();
+    CreateDepth depth;
     HWND hidden = nullptr;
     DXGI_SWAP_CHAIN_DESC dd = desc ? *desc : DXGI_SWAP_CHAIN_DESC{};
     IDXGIFactory2* f2 = nullptr;
@@ -1348,6 +1357,9 @@ static HRESULT STDMETHODCALLTYPE hk_CreateSCHwnd(IDXGIFactory2* f, IUnknown* d, 
     if (p12Busy()) return o_CreateSCHwnd(f, d, w, desc, fs, o, sc);
     bool viaWrapper = false;
     bool game = takeAsGame(_ReturnAddress(), d, w, &viaWrapper);
+    if (!game) noteNotTaken(_ReturnAddress());
+    else if (!p12Enabled()) notePresentOff();
+    CreateDepth depth;
     HWND hidden = game && desc && p12Enabled() ? p12Init(d, f, o_CreateSCHwnd, w, desc) : nullptr;
     // natively on Windows the game's flip-model swap chain gets the tearing flag; refused: made without it, never again
     DXGI_SWAP_CHAIN_DESC1 nd = desc ? *desc : DXGI_SWAP_CHAIN_DESC1{};
@@ -1467,6 +1479,29 @@ static bool takeAsGame(void* ret, IUnknown* device, HWND w, bool* viaWrapper) {
     if (!named.exchange(true)) logf("dxgi: the game's swap chain was passed on by %ls", name);
     *viaWrapper = true;
     return true;
+}
+
+// A swap chain creation passed through from a caller takeAsGame does not log: a system module, or code in no module
+// (another program's hook, most often), when it is not the system's nested call inside one of ours. Our own and
+// Streamline's stay silent. Capped at 8 lines.
+static void noteNotTaken(void* ret) {
+    if (s_createDepth) return;
+    HMODULE m = nullptr;
+    const swapchain_caller::Mod k = moduleOf(ret, &m);
+    if (k != swapchain_caller::Mod::kSystem && k != swapchain_caller::Mod::kNone) return;
+    static std::atomic<int> logged;
+    if (logged.fetch_add(1) >= 8) return;
+    wchar_t fn[MAX_PATH] = L"?";
+    if (!m || !GetModuleFileNameW(m, fn, MAX_PATH)) wcscpy_s(fn, L"?");
+    const wchar_t* name = wcsrchr(fn, L'\\') ? wcsrchr(fn, L'\\') + 1 : fn;
+    if (k == swapchain_caller::Mod::kSystem) logf("dxgi: swap chain from %ls not taken (called by a system module), passed through", name);
+    else logf("dxgi: swap chain from %p not taken (called from code in no module, often another program's overlay), passed through", ret);
+}
+
+// [d3d12] present=0: the game's swap chain is taken but our presenter stays off. Said once.
+static void notePresentOff() {
+    static std::atomic<bool> told;
+    if (!told.exchange(true)) logf("d3d12: present=0 in ffxv_dlss.ini, the game keeps its own swap chain: no menu or frame generation");
 }
 
 // Called from Present: once the D3D12 device is lost, log why (and DRED's last operations / page fault, if enabled).
