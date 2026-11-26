@@ -660,7 +660,7 @@ bool dlssReplaceTaa(ID3D11DeviceContext* ctx) {
                     for (size_t p = 1; p < 64 && !period; ++p)
                         if (std::equal(seq.begin() + p, seq.end(), seq.begin())) period = p;
                     logf("dlss: jitter over 128 frames: %zu distinct, period %zu (0 = none < 64), render %ux%u -> %ux%u",
-                         u.size(), period, inW, inH, outW, outH);
+                         u.size(), period, inW, inH, dlssW, dlssH);
                 }
             }
             const float jitter[2] = { ev.InJitterOffsetX, ev.InJitterOffsetY };
