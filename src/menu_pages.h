@@ -288,10 +288,11 @@ inline Help help(Id id, const State& s) {
         const char* const reported = dlssFg && !s.wine ? supportAdvice(s.fgSupport, &adviceLines) : nullptr;
         const char* advice = reported && restartBackend(s) && adviceLines + 1 > kHelpLines ? nullptr : reported;
         if (!s.fgAvailable) {
-            if (s.running == 0 && advice) warn(adviceLines, "%s", advice);
-            else if (s.running == 0 && s.dlssg && !reported) dimLine = "Not available: DLSS frame generation needs an RTX 40 or 50 card.";
-            else if (s.running == 0) warn(2, "%s", "nvngx_dlssg.dll not found. Copy it from the DLSS SDK into ffxv_dlss\\streamline and restart.");
-            else if (s.running == 2) {
+            if (s.running == 0) {  // a reported reason that gave way to the restart line leaves no other cause in its place
+                if (advice) warn(adviceLines, "%s", advice);
+                else if (!s.dlssg) warn(2, "%s", "nvngx_dlssg.dll not found. Copy it from the DLSS SDK into ffxv_dlss\\streamline and restart.");
+                else if (!reported) dimLine = "Not available: DLSS frame generation needs an RTX 40 or 50 card.";
+            } else if (s.running == 2) {
                 if (!s.xessFgFiles) warn(2, "%s", "XeSS frame generation needs libxess.dll, libxess_fg.dll and libxell.dll in ffxv_dlss\\xess.");
                 else if (s.formatRefused) { dimLine = "Not available: XeSS frame generation does not take HDR output. Turn HDR off in the game."; dimCost = 2; }
                 else if (s.launchEnable) { dimLine = "Not available: Intel XeSS frame generation did not start. ffxv_dlss.log has the reason."; dimCost = 2; }
