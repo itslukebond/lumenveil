@@ -653,6 +653,7 @@ void drawCounter() {
     // the lines under the graph
     char fgLine[32], res[32] = "", verLine[96] = "";
     const bool gen = pages::counterFg(fgLine, sizeof fgLine, fg.available, fg.generating, fg.noFrames, g_fpsShown, g_fpsRendered);
+    const bool base = pages::counterBase(fg.generating, g_fpsRendered);
     if (g_w && g_h) snprintf(res, sizeof res, "%u\xC3\x97%u", g_w, g_h);  // the screen resolution: the swap chain's size
     const DlssInfo di = dlssInfo();
     const int up = di.active == 1 || di.active == 2 ? di.active : 0;  // the upscaler running, else DLSS's version once loaded
@@ -693,13 +694,13 @@ void drawCounter() {
     };
     const float baseX = p.x + slotFps + 7 * s + unitFps + 22 * s;
     bigNumber(g_big, p.x, slotFps, g_fpsShown, "FPS");
-    if (gen) bigNumber(g_bigThin, baseX, slotBase, g_fpsRendered, "BASE");  // with FG off both numbers are the same
+    if (base) bigNumber(g_bigThin, baseX, slotBase, g_fpsRendered, "BASE");  // with FG off both numbers are the same
     // the frame time under each number: the shown frames', and the game's own while frame generation runs
     const float my = p.y + g_big->FontSize + 3 * s;
     char ms[24];
     look::msText(ms, sizeof ms, g_fpsShown);
     dl->AddText(sm, sm->FontSize, ImVec2(p.x, my), look::col(look::kInk2), ms);
-    if (gen) { look::msText(ms, sizeof ms, g_fpsRendered); dl->AddText(sm, sm->FontSize, ImVec2(baseX, my), look::col(look::kInk2), ms); }
+    if (base) { look::msText(ms, sizeof ms, g_fpsRendered); dl->AddText(sm, sm->FontSize, ImVec2(baseX, my), look::col(look::kInk2), ms); }
     // the graph, then a fading rule above the lines
     const float gy = my + sm->FontSize + 8 * s, gh = 34 * s, ry = gy + gh + 4 * s + 8 * s;
     drawGraph(dl, ImVec2(p.x, gy), ImVec2(p.x + cw, gy + gh));

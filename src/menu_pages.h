@@ -402,6 +402,9 @@ inline bool counterFg(char* out, size_t n, bool available, bool generating, int 
     std::snprintf(out, n, "%s", available ? "FG off" : "FG n/a");
     return false;
 }
+// The counter's BASE reading (the rendered frame rate beside the shown one): whenever frame generation is on and has
+// counted rendered frames, also while it adds none, so the two numbers can be compared.
+inline bool counterBase(bool generating, float rendered) { return generating && rendered > 0; }
 
 // ---- pages -------------------------------------------------------------------------------------------------------------
 // Tab turns the desktop page forward on a press; never with Shift (Steam's overlay key), while a number box is typed in
