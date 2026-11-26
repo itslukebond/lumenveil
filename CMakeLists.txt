@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(ffxv_dlss VERSION 1.0.2 LANGUAGES C CXX ASM_MASM)  # the release number the menu shows
+project(ffxv_dlss VERSION 1.0.3 LANGUAGES C CXX ASM_MASM)  # the release number the menu shows
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded")  # static CRT: no extra DLLs in the game folder
