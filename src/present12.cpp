@@ -394,6 +394,13 @@ bool fgDrained() {
     return false;
 }
 
+// Once per launch, the first frame FSR or XeSS frame generation took with the HUD-less image (what a player's log needs
+// to show the HUD is kept out of generated frames).
+static void noteHudlessTaken(const char* backend, bool taken) {
+    static bool logged;
+    if (taken && !logged) { logged = true; logf("hudless: %s frame generation took the HUD-less image", backend); }
+}
+
 void fgBeforePresent() {
     FgFrame f = {};
     const bool valid = dlssTakeFrame(&f);
@@ -414,13 +421,17 @@ void fgBeforePresent() {
         && (!g_wine || proxyFg() || (GetTickCount64() - g_validSince >= kSettleMs && fgDrained()))) fgSetMode(true);
     else if (g_fgOn && (g_invalidRun >= 8 || !g_set.enable)) fgSetMode(false);
     if (g_fsrFg) {
+        const bool hudless = g_hudlessWritten;
         g_fsrGen = fsrFgFrame(g_d3d12, g_sc, g_fgOn, tagged ? &f : nullptr, depth12, mv12, g_hudlessWritten ? g_hudless12[g_hudlessSlot] : nullptr, reset);
+        noteHudlessTaken("FSR", g_fsrGen && hudless);
         if (g_hudlessWritten) { g_hudlessWritten = false; g_hudlessSlot = (g_hudlessSlot + 1) % kHudless; }
         g_d3d12Queue->Signal(g_fence, g_inputsFree = ++g_fenceVal);  // the prepare pass has read this frame's mv/depth
         return;
     }
     if (g_xessSc) {
+        const bool hudless = g_hudlessWritten;
         g_xessGen = xessFgFrame(g_fgOn, tagged ? &f : nullptr, depth12, mv12, g_hudlessWritten ? g_hudless12[g_hudlessSlot] : nullptr, reset, g_xeId);
+        noteHudlessTaken("XeSS", g_xessGen && hudless);
         if (g_hudlessWritten) { g_hudlessWritten = false; g_hudlessSlot = (g_hudlessSlot + 1) % kHudless; }
         g_d3d12Queue->Signal(g_fence, g_inputsFree = ++g_fenceVal);  // XeSS has copied this frame's mv/depth on its list
         p12FirstDraw();  // no draws this frame: still close the simulation span

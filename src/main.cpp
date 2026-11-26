@@ -364,19 +364,25 @@ static void STDMETHODCALLTYPE hk_PSSetShader(ID3D11DeviceContext* ctx, ID3D11Pix
 // The blit fills the display-res UI layer with the scene; the HUD is then drawn into it and the final composite puts
 // the layer into the back buffer. A copy of the layer taken right after the blit is the scene without the HUD;
 // replaying the game's own composite draw with that copy bound, into p12HudlessTarget(), gives the back buffer without
-// the HUD, encoded exactly as the real one (SDR, HDR10).
+// the HUD, encoded exactly as the real one (SDR, HDR10). The composite is a DrawIndexed. The blit's pixel shader also
+// draws into other targets (the HUD mask among them) and draws into the UI layer again later in the frame, so only its
+// first draw of the frame into the texture the composite reads at t0 is taken.
 static ID3D11Texture2D* g_layerCopy;
 static ID3D11ShaderResourceView* g_layerCopySRV;
-static ID3D11Resource* g_layerRes;  // identity only: the UI layer the composite reads
+static ID3D11Resource* g_uiLayer;   // identity only: what the last composite read at t0
+static ID3D11Resource* g_layerRes;  // identity only: the UI layer the copy was taken from
 static bool g_layerReady;           // copied this frame, not yet replayed
+static unsigned long long g_layerFrame = ~0ull;  // g_frame of the last copy
 
 static void hudlessCaptureLayer(ID3D11DeviceContext* ctx) {
-    g_layerReady = false;
-    if (!p12WantsHudless()) return;
+    if (!p12WantsHudless() || !g_uiLayer || g_layerFrame == g_frame) return;
     ID3D11RenderTargetView* rtv = nullptr;
     ctx->OMGetRenderTargets(1, &rtv, nullptr);
     if (!rtv) return;
     ID3D11Resource* r = nullptr; rtv->GetResource(&r); rtv->Release();
+    if (r != g_uiLayer) { r->Release(); return; }
+    g_layerReady = false;
+    g_layerFrame = g_frame;
     D3D11_RESOURCE_DIMENSION dim; r->GetType(&dim);
     D3D11_TEXTURE2D_DESC d = {}, have = {};
     if (dim == D3D11_RESOURCE_DIMENSION_TEXTURE2D) ((ID3D11Texture2D*)r)->GetDesc(&d);
@@ -399,9 +405,21 @@ static void hudlessCaptureLayer(ID3D11DeviceContext* ctx) {
 }
 
 // Right after the game's composite: the same draw again with the HUD-less layer, into this frame's HUD-less target.
-static void hudlessReplay(ID3D11DeviceContext* ctx, UINT c, UINT start) {
-    if (!g_layerReady) return;
+// indexed: the composite was a DrawIndexed(c, start, base), else a Draw(c, start). Bound state is the game's, so the
+// replay draws with its buffers; binds go through the original calls, past the mod's own view and target swaps.
+static void hudlessReplay(ID3D11DeviceContext* ctx, bool indexed, UINT c, UINT start, INT base) {
+    if (!p12WantsHudless()) return;
+    {
+        ID3D11ShaderResourceView* t0 = nullptr;
+        ctx->PSGetShaderResources(0, 1, &t0);
+        ID3D11Resource* r = nullptr;
+        if (t0) { t0->GetResource(&r); t0->Release(); }
+        g_uiLayer = r;  // identity only
+        if (r) r->Release();
+    }
+    const bool fresh = g_layerReady && g_layerFrame == g_frame;  // a copy from an earlier frame is never replayed
     g_layerReady = false;
+    if (!fresh) return;
     ID3D11ShaderResourceView* srv[8] = {};
     ctx->PSGetShaderResources(0, 8, srv);
     int slot = -1;
@@ -412,14 +430,18 @@ static void hudlessReplay(ID3D11DeviceContext* ctx, UINT c, UINT start) {
     if (!logged) { logged = true; logf("hudless: composite reads the UI layer at t%d, target %p", slot, (void*)target); }
     if (target) {
         ID3D11RenderTargetView* rtv[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT] = {}; ID3D11DepthStencilView* dsv = nullptr;
+        using PFN_PSSetSRV = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*, UINT, UINT, ID3D11ShaderResourceView* const*);
+        using PFN_OMSetRT = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*, UINT, ID3D11RenderTargetView* const*, ID3D11DepthStencilView*);
+        using PFN_ClearRTV = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*, ID3D11RenderTargetView*, const FLOAT*);
         ctx->OMGetRenderTargets(_countof(rtv), rtv, &dsv);
         const float black[4] = {};
-        ctx->ClearRenderTargetView(target, black);
-        ctx->PSSetShaderResources(slot, 1, &g_layerCopySRV);
-        ctx->OMSetRenderTargets(1, &target, nullptr);
-        orig<PFN_Draw>(ctx, 13)(ctx, c, start);
-        ctx->PSSetShaderResources(slot, 1, &srv[slot]);
-        ctx->OMSetRenderTargets(_countof(rtv), rtv, dsv);
+        orig<PFN_ClearRTV>(ctx, 50)(ctx, target, black);
+        orig<PFN_PSSetSRV>(ctx, 8)(ctx, slot, 1, &g_layerCopySRV);
+        orig<PFN_OMSetRT>(ctx, 33)(ctx, 1, &target, nullptr);
+        if (indexed) orig<PFN_DrawIndexed>(ctx, 12)(ctx, c, start, base);
+        else orig<PFN_Draw>(ctx, 13)(ctx, c, start);
+        orig<PFN_PSSetSRV>(ctx, 8)(ctx, slot, 1, &srv[slot]);
+        orig<PFN_OMSetRT>(ctx, 33)(ctx, _countof(rtv), rtv, dsv);
         for (auto* x : rtv) if (x) x->Release();
         if (dsv) dsv->Release();
     }
@@ -707,7 +729,7 @@ static void STDMETHODCALLTYPE hk_Draw(ID3D11DeviceContext* ctx, UINT c, UINT s) 
     }
     if (ctx == g_imm && g_immPS && g_immPS == g_compositePS) {
         orig<PFN_Draw>(ctx, 13)(ctx, c, s);
-        hudlessReplay(ctx, c, s);
+        hudlessReplay(ctx, false, c, s, 0);
         return;
     }
     orig<PFN_Draw>(ctx, 13)(ctx, c, s);
@@ -1038,6 +1060,7 @@ static void STDMETHODCALLTYPE hk_DrawIndexed(ID3D11DeviceContext* ctx, UINT c, U
     noteUiDraw(ctx);
     gameSharpenCount(ctx, 12);
     orig<PFN_DrawIndexed>(ctx, 12)(ctx, c, s, b);
+    if (ctx == g_imm && g_immPS && g_immPS == g_compositePS) hudlessReplay(ctx, true, c, s, b);
 }
 
 bool uiSharp() { return g_uiFix; }
