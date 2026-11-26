@@ -1325,6 +1325,7 @@ static void createdBy(IDXGISwapChain* sc, bool p12, bool viaWrapper) {
     s_nativeCreate = false;
 }
 static HRESULT STDMETHODCALLTYPE hk_CreateSC(IDXGIFactory* f, IUnknown* d, DXGI_SWAP_CHAIN_DESC* desc, IDXGISwapChain** sc) {
+    if (s_createDepth) return o_CreateSC(f, d, desc, sc);  // the system's own creation inside ours: ours decides
     if (p12Busy()) return o_CreateSC(f, d, desc, sc);  // Streamline creating its own swapchain inside p12Init
     bool viaWrapper = false;
     bool game = takeAsGame(_ReturnAddress(), d, desc ? desc->OutputWindow : nullptr, &viaWrapper);
@@ -1354,6 +1355,9 @@ static HRESULT STDMETHODCALLTYPE hk_CreateSC(IDXGIFactory* f, IUnknown* d, DXGI_
 }
 static HRESULT STDMETHODCALLTYPE hk_CreateSCHwnd(IDXGIFactory2* f, IUnknown* d, HWND w, const DXGI_SWAP_CHAIN_DESC1* desc,
                                                  const DXGI_SWAP_CHAIN_FULLSCREEN_DESC* fs, IDXGIOutput* o, IDXGISwapChain1** sc) {
+    // the system's own creation inside ours (DXVK's CreateSwapChain calls this): the outer call takes it and keeps its
+    // native-presentation decision, which this call would otherwise reset
+    if (s_createDepth) return o_CreateSCHwnd(f, d, w, desc, fs, o, sc);
     if (p12Busy()) return o_CreateSCHwnd(f, d, w, desc, fs, o, sc);
     bool viaWrapper = false;
     bool game = takeAsGame(_ReturnAddress(), d, w, &viaWrapper);

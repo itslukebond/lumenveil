@@ -280,13 +280,15 @@ inline Help help(Id id, const State& s) {
         const char* dimLine = nullptr;
         int dimCost = 1;
         char ver[96] = "";
-        // DLSS frame generation unsupported here (Windows only: Wine may read GPU scheduling wrongly): the reason, unless a
-        // pending switch's restart line would then not fit
+        // DLSS frame generation unsupported here (Windows only: Wine may read GPU scheduling wrongly), whether it runs or its
+        // start-up stopped after the check: the reason, unless a pending switch's restart line would then not fit
         int adviceLines = 0;
-        const char* advice = s.fgBackend == 0 && !s.wine ? supportAdvice(s.fgSupport, &adviceLines) : nullptr;
+        const bool dlssFg = s.fgBackend == 0 || (!s.fgAvailable && s.running == 0 && s.dlssg);
+        const char* advice = dlssFg && !s.wine ? supportAdvice(s.fgSupport, &adviceLines) : nullptr;
         if (advice && restartBackend(s) && adviceLines + 1 > kHelpLines) advice = nullptr;
         if (!s.fgAvailable) {
-            if (s.running == 0 && s.dlssg) dimLine = "Not available: DLSS frame generation needs an RTX 40 or 50 card.";
+            if (s.running == 0 && advice) warn(adviceLines, "%s", advice);
+            else if (s.running == 0 && s.dlssg) dimLine = "Not available: DLSS frame generation needs an RTX 40 or 50 card.";
             else if (s.running == 0) warn(2, "%s", "nvngx_dlssg.dll not found. Copy it from the DLSS SDK into ffxv_dlss\\streamline and restart.");
             else if (s.running == 2) {
                 if (!s.xessFgFiles) warn(2, "%s", "XeSS frame generation needs libxess.dll, libxess_fg.dll and libxell.dll in ffxv_dlss\\xess.");
