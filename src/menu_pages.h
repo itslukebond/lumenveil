@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include "fg_support.h"
 
 namespace pages {
 
@@ -60,6 +61,8 @@ struct State {
     bool dlssg = true, fsrFiles = true, fsrFgDll = true, xessFgFiles = true;  // the backends' files are in place
     bool dynamicSupported = false;
     unsigned maxGenerated = 1;
+    int fgSupport = 0;              // Streamline's DLSS frame generation support result, 0 supported (fg_support.h)
+    bool wine = false;              // running under Wine or Proton
     int fgEnable = 0, frames = 1, target = 120, limit = 0, reflex = 1, antilag = 0;
     const char *dlssgVersion = "", *fsrFgVersion = "", *xessFgVersion = "";
     float shown = 0, rendered = 0;  // fps shown and rendered (generating)
@@ -203,6 +206,19 @@ struct Line { char text[256] = ""; Tone tone = kInk; };
 struct Help { Line line[kHelpLines]; int n = 0; Flag flag = kNoFlag; };
 
 inline bool restartScaling(const State& s) { return s.ratio && s.live && std::abs(s.live - s.ratio) > 1; }
+// What the Frame generation row says when Streamline reports that DLSS frame generation cannot run on this PC, and the
+// lines it takes in the wider-text layout; nullptr for a result with no words here (the log gives its number).
+inline const char* supportAdvice(int r, int* lines) {
+    *lines = 2;
+    switch (r) {
+    case fg_support::kOSDisabledHWS: *lines = 3; return "Windows has Hardware-accelerated GPU scheduling off, and DLSS frame generation needs it. Turn it on in Settings, System, Display, Graphics, then restart the PC.";
+    case fg_support::kOSOutOfDate: return "Windows is too old for DLSS frame generation. Update Windows, then restart the game.";
+    case fg_support::kDriverOutOfDate: return "The NVIDIA driver is too old for DLSS frame generation. Update the driver, then restart the game.";
+    case fg_support::kNoSupportedAdapter:
+    case fg_support::kAdapterNotSupported: return "This graphics card can't run DLSS frame generation. Pick FSR above instead.";
+    default: return nullptr;
+    }
+}
 inline bool restartBackend(const State& s) { return s.backend - 1 != s.launchBackend && s.picked != s.running; }
 inline bool restartFg(const State& s) { return s.offAtLaunch && s.fgEnable; }
 
@@ -264,6 +280,11 @@ inline Help help(Id id, const State& s) {
         const char* dimLine = nullptr;
         int dimCost = 1;
         char ver[96] = "";
+        // DLSS frame generation unsupported here (Windows only: Wine may read GPU scheduling wrongly): the reason, unless a
+        // pending switch's restart line would then not fit
+        int adviceLines = 0;
+        const char* advice = s.fgBackend == 0 && !s.wine ? supportAdvice(s.fgSupport, &adviceLines) : nullptr;
+        if (advice && restartBackend(s) && adviceLines + 1 > kHelpLines) advice = nullptr;
         if (!s.fgAvailable) {
             if (s.running == 0 && s.dlssg) dimLine = "Not available: DLSS frame generation needs an RTX 40 or 50 card.";
             else if (s.running == 0) warn(2, "%s", "nvngx_dlssg.dll not found. Copy it from the DLSS SDK into ffxv_dlss\\streamline and restart.");
@@ -274,7 +295,8 @@ inline Help help(Id id, const State& s) {
             } else if (!s.fsrFiles) warn(1, "%s", "AMD's FSR files not found (see the Upscaling page).");
             else if (!s.fsrFgDll) warn(2, "%s", "amd_fidelityfx_framegeneration_dx12.dll not found in ffxv_dlss\\fidelityfx.");
             else if (s.launchEnable) { dimLine = "Not available: AMD FSR frame generation did not start. ffxv_dlss.log has the reason."; dimCost = 2; }
-        } else if (s.fgBackend == 0 && *s.dlssgVersion) { std::snprintf(ver, sizeof ver, "NVIDIA DLSS frame generation %s.", s.dlssgVersion); dimLine = ver; }
+        } else if (advice) warn(adviceLines, "%s", advice);
+        else if (s.fgBackend == 0 && *s.dlssgVersion) { std::snprintf(ver, sizeof ver, "NVIDIA DLSS frame generation %s.", s.dlssgVersion); dimLine = ver; }
         else if (s.fgBackend == 1 && *s.fsrFgVersion) { std::snprintf(ver, sizeof ver, "AMD FSR frame generation %s.", s.fsrFgVersion); dimLine = ver; }
         else if (s.fgBackend == 2 && *s.xessFgVersion) { std::snprintf(ver, sizeof ver, "Intel XeSS frame generation %s, with Xe Low Latency.", s.xessFgVersion); dimLine = ver; }
         if (h.flag != kWarnFlag) add(kInk, 1, "%s", "Auto: DLSS on RTX 40 and 50, XeSS on Intel, else FSR.");

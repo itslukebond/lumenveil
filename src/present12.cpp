@@ -765,6 +765,7 @@ FgSettings fgSettings() { return g_set; }
 FgStatus fgStatus() {
     FgStatus s = g_status;
     s.vsyncPaced = g_wantSync;
+    s.wine = g_wine;
     s.available = g_fg || proxyFg(); s.generating = proxyFg() ? g_fsrGen || g_xessGen : g_fgOn; s.autoCap = g_autoCap;
     s.backend = g_xessSc ? 2 : g_fsrFg ? 1 : g_fg ? 0 : -1;
     s.formatRefused = g_xessRefused;

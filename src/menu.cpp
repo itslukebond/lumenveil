@@ -826,6 +826,7 @@ pages::State fillState() {
     s.offAtLaunch = !st.available && !fp.launchEnable && !st.formatRefused
                     && ((s.running == 1 && s.fsrFiles && s.fsrFgDll) || (s.running == 2 && s.xessFgFiles));
     s.dynamicSupported = st.dynamicSupported; s.maxGenerated = st.maxGenerated;
+    s.fgSupport = st.slSupport; s.wine = st.wine;
     s.fgEnable = fs.enable; s.frames = fs.frames; s.target = fs.target; s.limit = fs.limit; s.reflex = fs.reflex; s.antilag = fs.antilag;
     s.dlssgVersion = dlssgVersion(); s.fsrFgVersion = fsrFgVersion(); s.xessFgVersion = xessFgVersion();
     s.shown = g_fpsShown; s.rendered = g_fpsRendered;
