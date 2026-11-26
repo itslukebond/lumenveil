@@ -650,11 +650,9 @@ void drawCounter() {
     look::ctx().s = s; look::ctx().fontSmall = g_small;
     const bool right = g_corner & 1, bottom = g_corner & 2;
     const FgStatus fg = fgStatus();
-    const bool gen = fg.generating && g_fpsRendered > 0;
     // the lines under the graph
     char fgLine[32], res[32] = "", verLine[96] = "";
-    if (gen) snprintf(fgLine, sizeof fgLine, "FG %.1f\xC3\x97", g_fpsShown / g_fpsRendered);
-    else snprintf(fgLine, sizeof fgLine, "%s", fg.available ? "FG off" : "FG n/a");
+    const bool gen = pages::counterFg(fgLine, sizeof fgLine, fg.available, fg.generating, fg.noFrames, g_fpsShown, g_fpsRendered);
     if (g_w && g_h) snprintf(res, sizeof res, "%u\xC3\x97%u", g_w, g_h);  // the screen resolution: the swap chain's size
     const DlssInfo di = dlssInfo();
     const int up = di.active == 1 || di.active == 2 ? di.active : 0;  // the upscaler running, else DLSS's version once loaded
@@ -825,7 +823,7 @@ pages::State fillState() {
     // FSR or XeSS is ready but FG was off at launch (their swapchains are made only then): it can be turned on for the next
     s.offAtLaunch = !st.available && !fp.launchEnable && !st.formatRefused
                     && ((s.running == 1 && s.fsrFiles && s.fsrFgDll) || (s.running == 2 && s.xessFgFiles));
-    s.dynamicSupported = st.dynamicSupported; s.maxGenerated = st.maxGenerated;
+    s.dynamicSupported = st.dynamicSupported; s.maxGenerated = st.maxGenerated; s.noFrames = st.noFrames;
     s.fgSupport = st.slSupport; s.wine = st.wine;
     s.fgEnable = fs.enable; s.frames = fs.frames; s.target = fs.target; s.limit = fs.limit; s.reflex = fs.reflex; s.antilag = fs.antilag;
     s.dlssgVersion = dlssgVersion(); s.fsrFgVersion = fsrFgVersion(); s.xessFgVersion = xessFgVersion();
@@ -994,7 +992,7 @@ void drawStatus(ImDrawList* dl, ImFont* f, float size, ImVec2 p, const pages::St
     if (*st.size) { x += gap; put(st.size, look::kInk2); }
     x += gap;
     put("Frame generation ", look::kDim);
-    put(st.fg, st.fgTone == pages::kVendor && st.fgVendor >= 0 ? kAccents[st.fgVendor].hi : st.fgTone == pages::kDim ? look::kDim : look::kInk2);
+    put(st.fg, st.fgTone == pages::kVendor && st.fgVendor >= 0 ? kAccents[st.fgVendor].hi : toneColour(st.fgTone));
 }
 
 // The desktop menu's page and the help box's row (kept while the mouse is off the rows); g_pageTurn: Tab, L1

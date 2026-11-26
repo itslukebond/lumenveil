@@ -362,6 +362,7 @@ void fgSetMode(bool on) {
     g_fgOpts.flags = g_wine ? sl::DLSSGFlags(0) : sl::DLSSGFlags::eRetainResourcesWhenOff;  // Wine: release when off
     sl::Result r = slDLSSGSetOptions(g_vp, g_fgOpts);
     g_fgOn = on;
+    if (!on) g_status.noFrames = fg_support::kNotSeen;  // judged again from the first whole window after it is back on
     logf("fg: %s (%d) mode %d frames %u target %.0f, dynamic %s, max generated %u", on ? "ON" : "off", (int)r, (int)g_fgOpts.mode,
          g_fgOpts.numFramesToGenerate, g_fgOpts.dynamicTargetFrameRate, g_status.dynamicSupported ? "supported" : "unsupported", g_status.maxGenerated);
 }
@@ -512,10 +513,14 @@ unsigned fgAfterPresent() {
              GetCurrentThreadId(), di, polls / n, xi);
         logf("fg: present-thread us/frame: copy %.0f menu %.0f fgset %.0f Present %.0f fgstate %.0f reflex sleep %.0f | game %.0f",
              g_tUs[0] / n, g_tUs[1] / n, g_tUs[2] / n, g_tUs[3] / n, (g_tUs[4] - g_tUs[5]) / n, g_tUs[5] / n, g_tUs[6] / n);
-        static bool toldNone;  // once per launch: every window after it would say the same
+        // the menu's verdict follows every window; the log line is once per launch: every window after it would say the same
+        g_status.noFrames = fg_support::noFrames(0, g_encode, g_onFrames, g_presented, g_rendered);
+        static bool toldNone;
         if (!toldNone && fg_support::noneGenerated(g_onFrames, g_presented, g_rendered)) {
             toldNone = true;
-            logf("fg: DLSS frame generation is on but generated no frames in the last %u", g_rendered);
+            if (const char* why = fg_support::noFramesReason(g_status.noFrames))
+                logf("fg: DLSS frame generation is on but generated no frames in the last %u: %s. %s", g_rendered, why, fg_support::kScrgbAdvice);
+            else logf("fg: DLSS frame generation is on but generated no frames in the last %u", g_rendered);
         }
         std::fill(std::begin(g_tUs), std::end(g_tUs), 0.0);
         g_rendered = g_presented = g_onFrames = 0;

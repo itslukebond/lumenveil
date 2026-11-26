@@ -8,7 +8,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include "fg_support.h"
+#include "fg_support.h"  // support results and kScrgbAdvice, the same advice as the log
 
 namespace pages {
 
@@ -63,6 +63,7 @@ struct State {
     unsigned maxGenerated = 1;
     int fgSupport = 0;              // Streamline's DLSS frame generation support result, 0 supported (fg_support.h)
     bool wine = false;              // running under Wine or Proton
+    int noFrames = 0;               // the last whole window added no frames: 1 no cause named, 2 with scRGB output (fg_support.h)
     int fgEnable = 0, frames = 1, target = 120, limit = 0, reflex = 1, antilag = 0;
     const char *dlssgVersion = "", *fsrFgVersion = "", *xessFgVersion = "";
     float shown = 0, rendered = 0;  // fps shown and rendered (generating)
@@ -297,7 +298,9 @@ inline Help help(Id id, const State& s) {
             } else if (!s.fsrFiles) warn(1, "%s", "AMD's FSR files not found (see the Upscaling page).");
             else if (!s.fsrFgDll) warn(2, "%s", "amd_fidelityfx_framegeneration_dx12.dll not found in ffxv_dlss\\fidelityfx.");
             else if (s.launchEnable) { dimLine = "Not available: AMD FSR frame generation did not start. ffxv_dlss.log has the reason."; dimCost = 2; }
-        } else if (advice) warn(adviceLines, "%s", advice);
+        } else if (advice) warn(adviceLines, "%s", advice);  // unsupported here first, then scRGB, then the version
+        else if (s.fgBackend == 0 && s.noFrames == fg_support::kNoneScrgb && !restartBackend(s))  // a restart line comes first
+            warn(2, "Adding no frames: DLSS frame generation does not support the game's 16-bit scRGB HDR output. %s", fg_support::kScrgbAdvice);
         else if (s.fgBackend == 0 && *s.dlssgVersion) { std::snprintf(ver, sizeof ver, "NVIDIA DLSS frame generation %s.", s.dlssgVersion); dimLine = ver; }
         else if (s.fgBackend == 1 && *s.fsrFgVersion) { std::snprintf(ver, sizeof ver, "AMD FSR frame generation %s.", s.fsrFgVersion); dimLine = ver; }
         else if (s.fgBackend == 2 && *s.xessFgVersion) { std::snprintf(ver, sizeof ver, "Intel XeSS frame generation %s, with Xe Low Latency.", s.xessFgVersion); dimLine = ver; }
@@ -310,7 +313,9 @@ inline Help help(Id id, const State& s) {
     case kFgEnabled:
         add(kInk, 1, "%s", "Shows generated frames between the ones the game renders.");
         if (restartFg(s)) restart("Restart the game to switch frame generation.");
-        if (s.generating && s.rendered > 0)
+        if (s.generating && s.noFrames)
+            add(kDim, 1, "%s", s.noFrames == fg_support::kNoneScrgb ? "On, but adding no frames with the game's HDR output." : "On, but adding no frames at the moment.");
+        else if (s.generating && s.rendered > 0)
             add(kDim, 1, "Generating %.1f\xC3\x97: %.0f fps shown from %.0f rendered.", double(s.shown / s.rendered), double(s.shown), double(s.rendered));
         else if (s.fgAvailable && s.fgEnable) add(kDim, 1, "%s", "Idle: turns on in gameplay, where the upscaler runs.");
         else if (!s.fgEnable) add(kDim, 1, "%s", "Frame generation is off.");
@@ -378,13 +383,24 @@ inline Status status(const State& s) {
     else if (s.ratio && s.dispW)
         std::snprintf(st.size, sizeof st.size, "%u\xC3\x97%u from next start", s.dispW * unsigned(s.ratio) / 100, s.dispH * unsigned(s.ratio) / 100);
     else if (s.ratio) std::snprintf(st.size, sizeof st.size, "%d%% from next start", s.ratio);
-    if (s.generating && s.rendered > 0) {
+    if (s.generating && s.noFrames) {
+        std::snprintf(st.fg, sizeof st.fg, "adding no frames");
+        st.fgTone = s.noFrames == fg_support::kNoneScrgb ? kAmber : kDim;
+    } else if (s.generating && s.rendered > 0) {
         std::snprintf(st.fg, sizeof st.fg, "generating %.1f\xC3\x97", double(s.shown / s.rendered));
         st.fgTone = kVendor; st.fgVendor = s.fgBackend;
     } else if (!s.fgAvailable && !s.offAtLaunch) { std::snprintf(st.fg, sizeof st.fg, "not available"); st.fgTone = kDim; }
     else if (!s.fgEnable || !s.fgAvailable) std::snprintf(st.fg, sizeof st.fg, "off");
     else std::snprintf(st.fg, sizeof st.fg, "waiting for gameplay");
     return st;
+}
+
+// The FPS counter's frame generation line; true when it shows a multiplier, drawn in the generating vendor's colour.
+inline bool counterFg(char* out, size_t n, bool available, bool generating, int noFrames, float shown, float rendered) {
+    if (generating && noFrames) { std::snprintf(out, n, "FG no frames"); return false; }
+    if (generating && rendered > 0) { std::snprintf(out, n, "FG %.1f\xC3\x97", double(shown / rendered)); return true; }
+    std::snprintf(out, n, "%s", available ? "FG off" : "FG n/a");
+    return false;
 }
 
 // ---- pages -------------------------------------------------------------------------------------------------------------
